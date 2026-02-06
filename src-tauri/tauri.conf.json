@@ -1,0 +1,48 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "Cloud-PE One",
+  "version": "1.5.0",
+  "identifier": "cn.cloud-pe.one",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Cloud-PE One",
+        "width": 1024,
+        "height": 630,
+        "minWidth": 630,
+        "minHeight": 630,
+        "resizable": true,
+        "fullscreen": false,
+        "decorations": false,
+        "transparent": true,
+        "visible": false,
+        "windowEffects": {
+          "effects": ["mica"],
+          "state": "active",
+          "radius": 12.0
+        }
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "copyright": "© 2025-Present Cloud-PE Dev (@dddffgg & @Hello,World!)",
+    "icon": [
+      "icons/icon.ico"
+    ]
+  },
+  "plugins": {
+    "store": null,
+    "process": { "all": true }
+  }
+}
