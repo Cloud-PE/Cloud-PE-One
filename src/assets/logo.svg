@@ -1,10 +1,16 @@
 <svg width="265" height="265" xmlns="http://www.w3.org/2000/svg" xml:space="preserve" overflow="hidden">
+  <defs>
+    <!-- 135度深灰到黑色渐变 -->
+    <linearGradient id="bgGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#3a3a3a;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#000000;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+
   <g transform="translate(-815 -256)">
-    <!-- 使用 foreignObject 嵌入 HTML 渐变背景 -->
-    <foreignObject x="816" y="259" width="260" height="260">
-      <div xmlns="http://www.w3.org/1999/xhtml" style="width: 260px; height: 260px; border-radius: 50%; background-image: linear-gradient(339deg, #00a2e8, #597dfc, #12a3db, #0070ff); background-size: 750%; background-position: 84% 93%;"></div>
-    </foreignObject>
-    
+    <!-- 圆形渐变背景 -->
+    <circle cx="946" cy="389" r="130" fill="url(#bgGradient)"/>
+
     <!-- 真正的矢量路径 - Microsoft Calibri Bold (原版) - 已居中 -->
     <g transform="translate(905.984, 582.440) scale(0.07177734375, -0.07177734375)">
       <g transform="translate(0, 2048)">
