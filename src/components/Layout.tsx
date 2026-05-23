@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 
 import { useAppContext } from '../utils/AppContext';
+import logoSvg from '../assets/logo.svg';
 
 import { Window } from '@tauri-apps/api/window';
 const appWindow = new Window('main');
@@ -231,8 +232,8 @@ const AppLayout: React.FC<AppLayoutProps> = ({ children, currentPage, onNavigate
         {/* 左侧Logo和标题区域 */}
         <div className="flex items-center" data-tauri-drag-region>
           <img
-            src=""
-            className="cloud-pe-logo w-[30px] h-[30px] mr-2"
+            src={logoSvg}
+            className="w-[30px] h-[30px] mr-2"
             alt="Logo"
             data-tauri-drag-region
           />
