@@ -51,54 +51,78 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           INPUT_OVERRIDE: ${{ github.event.inputs.version_override }}
         run: |
+          $ErrorActionPreference = 'Stop'
+          function Write-Summary($msg) {
+            $msg | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            Write-Host $msg
+          }
+
+          Write-Summary "### Compute next version"
+          $rawOverride = $env:INPUT_OVERRIDE
+          if ($null -eq $rawOverride) { $rawOverride = '' }
+          Write-Summary ("- INPUT_OVERRIDE raw: '" + $rawOverride + "' (len=" + $rawOverride.Length + ")")
+
+          $override = $rawOverride.Trim()
+          Write-Summary ("- override trimmed: '" + $override + "' (len=" + $override.Length + ")")
+
           $headers = @{
             Authorization = "Bearer $env:GH_TOKEN"
             Accept = "application/vnd.github+json"
             'X-GitHub-Api-Version' = '2022-11-28'
           }
 
-          $override = ($env:INPUT_OVERRIDE ?? '').Trim()
-          if ($override) {
-            $clean = $override.TrimStart('v','V')
-            if ($clean -notmatch '^\d+\.\d+(\.\d+)?$') {
-              throw "version_override '$override' is not in the form MAJOR.MINOR or MAJOR.MINOR.PATCH"
-            }
-            $parts = $clean.Split('.')
-            $major = [int]$parts[0]
-            $minor = [int]$parts[1]
-          } else {
-            $tag = $null
-            try {
-              $latest = Invoke-RestMethod -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/latest" -Headers $headers
-              $tag = $latest.tag_name
-            } catch {
-              Write-Host "No previous release found, falling back to Cargo.toml"
-            }
+          try {
+            if ($override) {
+              $clean = $override.TrimStart('v','V')
+              Write-Summary "- override clean: '$clean'"
+              if ($clean -notmatch '^\d+\.\d+(\.\d+)?$') {
+                throw "version_override '$rawOverride' must look like 1.7 or v1.7 or 1.7.0"
+              }
+              $parts = $clean.Split('.')
+              $major = [int]$parts[0]
+              $minor = [int]$parts[1]
+              Write-Summary "- using override -> major=$major minor=$minor"
+            } else {
+              $tag = $null
+              try {
+                $latest = Invoke-RestMethod -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/latest" -Headers $headers
+                $tag = $latest.tag_name
+                Write-Summary "- latest release tag: $tag"
+              } catch {
+                Write-Summary "- /releases/latest failed: $_"
+              }
 
-            if (-not $tag) {
-              $cargo = Get-Content src-tauri/Cargo.toml -Raw
-              if ($cargo -match '(?m)^version\s*=\s*"(\d+)\.(\d+)\.(\d+)"') {
+              if (-not $tag) {
+                Write-Summary "- falling back to Cargo.toml"
+                $cargo = Get-Content src-tauri/Cargo.toml -Raw
+                if ($cargo -match '(?m)^version\s*=\s*"(\d+)\.(\d+)\.(\d+)"') {
+                  $major = [int]$matches[1]
+                  $minor = [int]$matches[2]
+                } else {
+                  throw "Could not parse version from Cargo.toml"
+                }
+              } else {
+                $clean = $tag.TrimStart('v','V')
+                if ($clean -notmatch '^(\d+)\.(\d+)') {
+                  throw "Latest tag '$tag' is not in the expected MAJOR.MINOR form"
+                }
                 $major = [int]$matches[1]
                 $minor = [int]$matches[2]
-              } else {
-                throw "Could not determine current version from Cargo.toml"
               }
-            } else {
-              $clean = $tag.TrimStart('v','V')
-              if ($clean -notmatch '^(\d+)\.(\d+)') {
-                throw "Latest tag '$tag' is not in the expected format"
-              }
-              $major = [int]$matches[1]
-              $minor = [int]$matches[2]
+              $minor = $minor + 1
+              Write-Summary "- auto-incremented -> major=$major minor=$minor"
             }
-            $minor = $minor + 1
-          }
 
-          $newVersion = "$major.$minor.0"
-          $newTag = "v$major.$minor"
-          "new_version=$newVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          "new_tag=$newTag"         | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          Write-Host "Next version: $newVersion (tag $newTag)"
+            $newVersion = "$major.$minor.0"
+            $newTag = "v$major.$minor"
+            "new_version=$newVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            "new_tag=$newTag"         | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            Write-Summary "**Next version: $newVersion (tag $newTag)**"
+          } catch {
+            Write-Summary ("**FAILED**: " + $_.Exception.Message)
+            Write-Summary ("Stack: `n```" + $_.ScriptStackTrace + "```")
+            throw
+          }
 
       - name: Update version in source files
         shell: pwsh
