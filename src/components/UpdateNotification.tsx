@@ -29,43 +29,33 @@ const UpdateNotification: React.FC<UpdateNotificationProps> = ({
   const [, setDownloadSpeed] = useState<string>('0.00');
   const [error, setError] = useState<string | null>(null);
 
-  // 处理更新按钮点击
   const handleUpdate = async () => {
-    try {
-      setDownloading(true);
-      setError(null);
+    setDownloading(true);
+    setError(null);
 
-      // 调用Rust下载函数，并将返回值保存到script_path变量
+    const progressInterval = window.setInterval(async () => {
+      try {
+        const status = await invoke('get_app_download_status');
+        if (status) {
+          const { progress, speed } = status as { progress: number; speed: string };
+          setDownloadProgress(progress);
+          setDownloadSpeed(speed);
+        }
+      } catch (err) {
+        console.error('获取下载状态失败:', err);
+      }
+    }, 500);
+
+    try {
       const script_path: string = await invoke('download_update', {
         url: downloadLink,
-        appName: appExecutableName
+        appName: appExecutableName,
       });
-
-      // 启动下载进度监控
-      const progressInterval = setInterval(async () => {
-        try {
-          const status = await invoke('get_app_download_status');
-          if (status) {
-            const { progress, speed } = status as { progress: number; speed: string };
-            setDownloadProgress(progress);
-            setDownloadSpeed(speed);
-
-            // 如果下载完成，清除定时器
-            if (progress === 100) {
-              clearInterval(progressInterval);
-              // 下载完成后，调用安装函数，传入scriptPath参数
-              await invoke('install_update', {
-                scriptPath: script_path
-              });
-              // 安装后应用会重启，不需要额外处理
-            }
-          }
-        } catch (err) {
-          console.error('获取下载状态失败:', err);
-        }
-      }, 1000);
-
+      clearInterval(progressInterval);
+      setDownloadProgress(100);
+      await invoke('install_update', { scriptPath: script_path });
     } catch (err) {
+      clearInterval(progressInterval);
       console.error('更新失败:', err);
       setError('更新过程中出现错误，请稍后重试。');
       setDownloading(false);
