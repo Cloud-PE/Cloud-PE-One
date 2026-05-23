@@ -1,0 +1,315 @@
+name: Build and Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_notes:
+        description: '更新内容 (支持 Markdown，使用 \n 表示换行)'
+        required: true
+        type: string
+      version_override:
+        description: '可选：手动指定版本号 (例如 1.7 或 v1.7)。留空则在最新 release 基础上自动递增 minor。'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Compute next version
+        id: version
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_OVERRIDE: ${{ github.event.inputs.version_override }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Write-Summary($msg) {
+            $msg | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            Write-Host $msg
+          }
+
+          Write-Summary "### Compute next version"
+          $rawOverride = $env:INPUT_OVERRIDE
+          if ($null -eq $rawOverride) { $rawOverride = '' }
+          Write-Summary ("- INPUT_OVERRIDE raw: '" + $rawOverride + "' (len=" + $rawOverride.Length + ")")
+
+          $override = $rawOverride.Trim()
+          Write-Summary ("- override trimmed: '" + $override + "' (len=" + $override.Length + ")")
+
+          $headers = @{
+            Authorization = "Bearer $env:GH_TOKEN"
+            Accept = "application/vnd.github+json"
+            'X-GitHub-Api-Version' = '2022-11-28'
+          }
+
+          try {
+            if ($override) {
+              $clean = $override.TrimStart('v','V')
+              Write-Summary "- override clean: '$clean'"
+              if ($clean -notmatch '^\d+\.\d+(\.\d+)?$') {
+                throw "version_override '$rawOverride' must look like 1.7 or v1.7 or 1.7.0"
+              }
+              $parts = $clean.Split('.')
+              $major = [int]$parts[0]
+              $minor = [int]$parts[1]
+              Write-Summary "- using override -> major=$major minor=$minor"
+            } else {
+              # Pick the most recent release / tag whose name parses as MAJOR.MINOR[.PATCH].
+              # `/releases/latest` may have a tag_name like "Release" instead of "v1.6"
+              # (display name and tag name can diverge), so we also consider the release
+              # name field and walk through the full release list and tag list.
+              $major = $null
+              $minor = $null
+              $sources = @()
+
+              try {
+                $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases?per_page=100" -Headers $headers
+                foreach ($r in $releases) {
+                  if ($r.tag_name)    { $sources += $r.tag_name }
+                  if ($r.name)        { $sources += $r.name }
+                }
+              } catch {
+                Write-Summary "- /releases listing failed: $_"
+              }
+
+              try {
+                $tags = Invoke-RestMethod -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/tags?per_page=100" -Headers $headers
+                foreach ($t in $tags) { if ($t.name) { $sources += $t.name } }
+              } catch {
+                Write-Summary "- /tags listing failed: $_"
+              }
+
+              Write-Summary "- candidate version strings: $($sources -join ', ')"
+
+              foreach ($s in $sources) {
+                $clean = $s.TrimStart('v','V')
+                if ($clean -match '^(\d+)\.(\d+)') {
+                  $candMajor = [int]$matches[1]
+                  $candMinor = [int]$matches[2]
+                  if ($null -eq $major -or $candMajor -gt $major -or ($candMajor -eq $major -and $candMinor -gt $minor)) {
+                    $major = $candMajor
+                    $minor = $candMinor
+                  }
+                }
+              }
+
+              if ($null -eq $major) {
+                Write-Summary "- no version-shaped tag/release found, falling back to Cargo.toml"
+                $cargo = Get-Content src-tauri/Cargo.toml -Raw
+                if ($cargo -match '(?m)^version\s*=\s*"(\d+)\.(\d+)\.(\d+)"') {
+                  $major = [int]$matches[1]
+                  $minor = [int]$matches[2]
+                } else {
+                  throw "Could not parse version from Cargo.toml"
+                }
+              } else {
+                Write-Summary "- highest existing version: $major.$minor"
+              }
+              $minor = $minor + 1
+              Write-Summary "- auto-incremented -> major=$major minor=$minor"
+            }
+
+            $newVersion = "$major.$minor.0"
+            $newTag = "v$major.$minor"
+            "new_version=$newVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            "new_tag=$newTag"         | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            Write-Summary "**Next version: $newVersion (tag $newTag)**"
+          } catch {
+            Write-Summary ("**FAILED**: " + $_.Exception.Message)
+            $stack = $_.ScriptStackTrace
+            Write-Summary "Stack:"
+            Write-Summary $stack
+            throw
+          }
+
+      - name: Update version in source files
+        shell: pwsh
+        env:
+          NEW_VERSION: ${{ steps.version.outputs.new_version }}
+          NEW_TAG: ${{ steps.version.outputs.new_tag }}
+        run: |
+          $newVer = $env:NEW_VERSION
+          $newTag = $env:NEW_TAG
+
+          # src-tauri/Cargo.toml
+          $cargoPath = 'src-tauri/Cargo.toml'
+          $cargo = Get-Content $cargoPath -Raw
+          $cargo = [regex]::Replace($cargo, '(?m)^(version\s*=\s*")\d+\.\d+\.\d+(")', "`${1}$newVer`${2}", 1)
+          [System.IO.File]::WriteAllText((Resolve-Path $cargoPath), $cargo)
+
+          # src-tauri/tauri.conf.json
+          $tauriPath = 'src-tauri/tauri.conf.json'
+          $tauri = Get-Content $tauriPath -Raw
+          $tauri = [regex]::Replace($tauri, '"version"\s*:\s*"\d+\.\d+\.\d+"', "`"version`": `"$newVer`"", 1)
+          [System.IO.File]::WriteAllText((Resolve-Path $tauriPath), $tauri)
+
+          # src/utils/AppContext.tsx
+          $appCtxPath = 'src/utils/AppContext.tsx'
+          $appCtx = Get-Content $appCtxPath -Raw
+          $appCtx = [regex]::Replace($appCtx, "const CURRENT_VERSION\s*=\s*'v\d+\.\d+'", "const CURRENT_VERSION = '$newTag'", 1)
+          [System.IO.File]::WriteAllText((Resolve-Path $appCtxPath), $appCtx)
+
+          # src/hooks/useUpdateCheck.ts
+          $hookPath = 'src/hooks/useUpdateCheck.ts'
+          $hook = Get-Content $hookPath -Raw
+          $hook = [regex]::Replace($hook, "const CURRENT_VERSION\s*=\s*'v\d+\.\d+'", "const CURRENT_VERSION = '$newTag'", 1)
+          [System.IO.File]::WriteAllText((Resolve-Path $hookPath), $hook)
+
+          Write-Host "Bumped to $newVer / $newTag"
+
+      - name: Install npm dependencies
+        run: npm ci || npm install
+
+      - name: Build Tauri app
+        run: npm run tauri:build
+        env:
+          CARGO_TERM_COLOR: always
+
+      - name: Download latest Ventoy Windows release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $headers = @{
+            Authorization = "Bearer $env:GH_TOKEN"
+            Accept = "application/vnd.github+json"
+            'X-GitHub-Api-Version' = '2022-11-28'
+          }
+          $release = Invoke-RestMethod -Uri "https://api.github.com/repos/ventoy/Ventoy/releases/latest" -Headers $headers
+          $asset = $release.assets | Where-Object { $_.name -like '*-windows.zip' } | Select-Object -First 1
+          if (-not $asset) { throw "Could not find a *-windows.zip asset in Ventoy release $($release.tag_name)" }
+          Write-Host "Downloading Ventoy asset: $($asset.name) from release $($release.tag_name)"
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile ventoy.zip -UseBasicParsing
+          New-Item -ItemType Directory -Path ventoy-extract | Out-Null
+          Expand-Archive -Path ventoy.zip -DestinationPath ventoy-extract -Force
+          $inner = Get-ChildItem -Path ventoy-extract -Directory | Select-Object -First 1
+          if (-not $inner) { throw "Ventoy zip did not contain a top-level directory" }
+          if (Test-Path ventoy) { Remove-Item -Recurse -Force ventoy }
+          Move-Item -Path $inner.FullName -Destination ventoy
+          Remove-Item -Recurse -Force ventoy-extract, ventoy.zip
+
+      - name: Assemble Cloud-PE.One.zip
+        shell: pwsh
+        run: |
+          $exe = 'src-tauri/target/release/cloud-pe-one.exe'
+          if (-not (Test-Path $exe)) { throw "Built executable not found at $exe" }
+          if (Test-Path package) { Remove-Item -Recurse -Force package }
+          New-Item -ItemType Directory -Path package | Out-Null
+          Copy-Item $exe package/cloud-pe-one.exe
+          Copy-Item -Recurse ventoy package/ventoy
+          if (Test-Path Cloud-PE.One.zip) { Remove-Item Cloud-PE.One.zip -Force }
+          Compress-Archive -Path package/* -DestinationPath Cloud-PE.One.zip
+          $size = [math]::Round((Get-Item Cloud-PE.One.zip).Length / 1MB, 2)
+          Write-Host "Built Cloud-PE.One.zip ($size MB)"
+
+      - name: Commit version bump and tag
+        id: commit
+        shell: bash
+        env:
+          NEW_TAG: ${{ steps.version.outputs.new_tag }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src-tauri/Cargo.toml src-tauri/tauri.conf.json src/utils/AppContext.tsx src/hooks/useUpdateCheck.ts
+          if git diff --cached --quiet; then
+            echo "No version changes to commit"
+          else
+            git commit -m "chore: release ${NEW_TAG}"
+            git push origin "HEAD:${BRANCH}"
+          fi
+          NEW_SHA=$(git rev-parse HEAD)
+          echo "new_sha=${NEW_SHA}" >> "$GITHUB_OUTPUT"
+          git tag -f "${NEW_TAG}" "${NEW_SHA}"
+          git push origin "refs/tags/${NEW_TAG}" --force
+
+      - name: Delete previous releases
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          KEEP_TAG: ${{ steps.version.outputs.new_tag }}
+        run: |
+          $headers = @{
+            Authorization = "Bearer $env:GH_TOKEN"
+            Accept = "application/vnd.github+json"
+            'X-GitHub-Api-Version' = '2022-11-28'
+          }
+          $repo = $env:GITHUB_REPOSITORY
+          $keepTag = $env:KEEP_TAG
+          try {
+            $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases?per_page=100" -Headers $headers
+          } catch {
+            $releases = @()
+          }
+          foreach ($r in $releases) {
+            if ($r.tag_name -eq $keepTag) { continue }
+            Write-Host "Deleting release $($r.tag_name) (id=$($r.id))"
+            try {
+              Invoke-RestMethod -Method Delete -Uri "https://api.github.com/repos/$repo/releases/$($r.id)" -Headers $headers | Out-Null
+            } catch {
+              Write-Warning "Failed to delete release $($r.id): $_"
+            }
+            try {
+              Invoke-RestMethod -Method Delete -Uri "https://api.github.com/repos/$repo/git/refs/tags/$($r.tag_name)" -Headers $headers | Out-Null
+              Write-Host "Deleted tag $($r.tag_name)"
+            } catch {
+              Write-Warning "Failed to delete tag $($r.tag_name): $_"
+            }
+          }
+
+      - name: Prepare release notes
+        id: notes
+        shell: pwsh
+        env:
+          INPUT_NOTES: ${{ github.event.inputs.release_notes }}
+        run: |
+          $raw = $env:INPUT_NOTES
+          if ($null -eq $raw) { $raw = '' }
+          $body = $raw -replace '\\n', "`n"
+          $delim = "EOF_$([guid]::NewGuid().ToString('N'))"
+          "body<<$delim" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          $body          | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "$delim"       | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.new_tag }}
+          name: ${{ steps.version.outputs.new_tag }}
+          body: ${{ steps.notes.outputs.body }}
+          files: Cloud-PE.One.zip
+          draft: false
+          prerelease: false
+          make_latest: 'true'
+          target_commitish: ${{ steps.commit.outputs.new_sha }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
