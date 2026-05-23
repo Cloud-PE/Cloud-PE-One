@@ -170,15 +170,3 @@ export const saveFileDialog = async (
   }
 };
 
-// 下载文件到指定路径
-export const downloadFileToPath = async (
-  url: string,
-  savePath: string
-): Promise<void> => {
-  try {
-    return await tauriInvoke("download_file_to_path", { url, savePath });
-  } catch (error) {
-    console.error("下载文件失败:", error);
-    throw error;
-  }
-};

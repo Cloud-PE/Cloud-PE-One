@@ -1,20 +1,40 @@
-use anyhow::Result;
+use anyhow::{anyhow, bail, Context, Result};
 use futures_util::StreamExt;
-use reqwest::{Client, StatusCode, header::{HeaderMap, HeaderValue, ACCEPT_ENCODING}};
+use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::{mpsc, Mutex, Semaphore};
 use tokio::time::{interval, Duration, Instant};
 use url::Url;
-use tauri::{AppHandle, Emitter, Manager};
 
-const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36 Edg/138.0.0.0";
+const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+    (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36 Edg/138.0.0.0";
 
-// 下载进度信息
+const STATE_SUFFIX: &str = ".cpdl";
+const STATE_FORMAT_VERSION: u32 = 1;
+
+const FLUSH_INTERVAL_BYTES: u64 = 1 << 20;
+const SPEED_WINDOW: Duration = Duration::from_secs(2);
+const EMIT_INTERVAL: Duration = Duration::from_millis(250);
+const TICK_INTERVAL: Duration = Duration::from_millis(100);
+const STATE_SAVE_INTERVAL: Duration = Duration::from_secs(5);
+
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const HEAD_TIMEOUT: Duration = Duration::from_secs(15);
+const CHUNK_TIMEOUT: Duration = Duration::from_secs(60);
+
+const CHUNK_RETRY_LIMIT: u32 = 10;
+const FILE_INFO_RETRY_LIMIT: u32 = 3;
+const SINGLE_THREAD_RETRY_LIMIT: u32 = 5;
+
+const MAX_PARALLEL_WORKERS: usize = 16;
+const CANCELLED_MSG: &str = "下载已取消";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DownloadInfo {
     pub progress: String,
@@ -22,38 +42,32 @@ pub struct DownloadInfo {
     pub downloading: bool,
 }
 
-// 下载状态（用于更新）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DownloadStatus {
     pub progress: u64,
     pub speed: String,
 }
 
-// Worker信息
-#[derive(Debug, Clone)]
-pub struct WorkerInfo {
-    pub start_pos: u64,
-    pub current_pos: u64,
-    pub end_pos: u64,
+#[derive(Debug, Clone, Copy)]
+struct Worker {
+    start: u64,
+    current: u64,
+    end: u64,
 }
 
-// 进度更新
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-struct ProgressUpdate {
-    worker_id: usize,
-    bytes_downloaded: u64,
-    timestamp: Instant,
+impl Worker {
+    fn done(&self) -> bool {
+        self.current >= self.end
+    }
 }
 
-// 下载事件类型
-#[derive(Debug, Clone)]
-pub enum DownloadEvent {
-    Progress(DownloadInfo),
-    UpdateProgress(DownloadStatus),
+#[derive(Debug, Clone, Copy)]
+pub enum DownloadEventType {
+    FileDownload,
+    UpdateDownload,
+    PluginDownload,
 }
 
-// 下载器配置
 #[derive(Debug, Clone)]
 pub struct DownloadConfig {
     pub url: String,
@@ -63,997 +77,1008 @@ pub struct DownloadConfig {
     pub app_handle: Option<AppHandle>,
 }
 
-#[derive(Debug, Clone)]
-pub enum DownloadEventType {
-    FileDownload,    // 普通文件下载
-    UpdateDownload,  // 更新包下载
-    PluginDownload,  // 插件下载
+struct GlobalState {
+    cancel: AtomicBool,
+    update_status: std::sync::Mutex<Option<DownloadStatus>>,
 }
 
-// 全局下载状态存储（用于更新）
 lazy_static::lazy_static! {
-    pub static ref UPDATE_DOWNLOAD_STATUS: Arc<std::sync::Mutex<Option<DownloadStatus>>> = 
-        Arc::new(std::sync::Mutex::new(None));
+    static ref STATE: GlobalState = GlobalState {
+        cancel: AtomicBool::new(false),
+        update_status: std::sync::Mutex::new(None),
+    };
 }
 
-// 文件名解析相关函数
-fn extract_filename_from_response(response: &reqwest::Response) -> Option<String> {
-    response.headers()
+pub fn request_cancel() {
+    STATE.cancel.store(true, Ordering::Release);
+}
+
+pub fn get_update_download_status() -> Option<DownloadStatus> {
+    STATE.update_status.lock().ok().and_then(|s| s.clone())
+}
+
+fn reset_cancel() {
+    STATE.cancel.store(false, Ordering::Release);
+}
+
+fn cancelled() -> bool {
+    STATE.cancel.load(Ordering::Acquire)
+}
+
+fn set_update_status(status: Option<DownloadStatus>) {
+    if let Ok(mut guard) = STATE.update_status.lock() {
+        *guard = status;
+    }
+}
+
+fn extract_filename_from_response(resp: &reqwest::Response) -> Option<String> {
+    resp.headers()
         .get("content-disposition")
         .and_then(|v| v.to_str().ok())
-        .and_then(|cd| parse_content_disposition(cd))
+        .and_then(parse_content_disposition)
 }
 
 fn extract_filename_from_url(url: &Url) -> Option<String> {
-    url.path_segments()
-        .and_then(|segments| segments.last())
-        .filter(|s| !s.is_empty())
-        .and_then(|s| {
-            percent_encoding::percent_decode_str(s)
-                .decode_utf8()
-                .ok()
-                .map(|decoded| decoded.to_string())
-        })
+    let last = url.path_segments()?.last()?;
+    if last.is_empty() {
+        return None;
+    }
+    percent_encoding::percent_decode_str(last)
+        .decode_utf8()
+        .ok()
+        .map(|s| s.into_owned())
 }
 
 fn parse_content_disposition(cd: &str) -> Option<String> {
-    if let Some(filename) = parse_extended_filename(cd) {
-        return Some(filename);
-    }
-    parse_regular_filename(cd)
+    parse_ext_filename(cd).or_else(|| parse_plain_filename(cd))
 }
 
-fn parse_extended_filename(cd: &str) -> Option<String> {
-    let prefix = "filename*=";
-    let start = cd.find(prefix)?;
-    let value_start = start + prefix.len();
-    
-    let value_end = cd[value_start..]
-        .find(';')
-        .map(|i| value_start + i)
-        .unwrap_or(cd.len());
-    
-    let value = cd[value_start..value_end].trim();
-    
-    if let Some(first_quote) = value.find('\'') {
-        if let Some(second_quote) = value[first_quote + 1..].find('\'') {
-            let encoded_value = &value[first_quote + 1 + second_quote + 1..];
-            
-            if let Ok(decoded) = percent_encoding::percent_decode_str(encoded_value).decode_utf8() {
-                return Some(decoded.to_string());
-            }
-        }
-    }
-    
-    None
+fn parse_ext_filename(cd: &str) -> Option<String> {
+    let start = cd.find("filename*=")? + "filename*=".len();
+    let end = cd[start..].find(';').map(|i| start + i).unwrap_or(cd.len());
+    let raw = cd[start..end].trim();
+
+    let lang_sep = raw.find('\'')?;
+    let after_lang = &raw[lang_sep + 1..];
+    let enc_sep = after_lang.find('\'')?;
+    let payload = &after_lang[enc_sep + 1..];
+
+    percent_encoding::percent_decode_str(payload)
+        .decode_utf8()
+        .ok()
+        .map(|s| s.into_owned())
 }
 
-fn parse_regular_filename(cd: &str) -> Option<String> {
-    let prefix = "filename=";
-    let start = cd.find(prefix)?;
-    let value_start = start + prefix.len();
-    let value = &cd[value_start..];
-    
-    if value.starts_with('"') {
-        let mut escaped = false;
-        for (i, ch) in value[1..].char_indices() {
-            match ch {
-                '\\' if !escaped => escaped = true,
-                '"' if !escaped => {
-                    let filename = &value[1..i + 1];
-                    return Some(unescape_quoted_string(filename));
-                }
-                _ => escaped = false,
-            }
-        }
-    } else {
-        let end = value.find(';').unwrap_or(value.len());
-        let filename = value[..end].trim();
-        
-        if let Ok(decoded) = percent_encoding::percent_decode_str(filename).decode_utf8() {
-            return Some(decoded.to_string());
-        }
-        
-        return Some(filename.to_string());
-    }
-    
-    None
-}
+fn parse_plain_filename(cd: &str) -> Option<String> {
+    let start = cd.find("filename=")? + "filename=".len();
+    let rest = &cd[start..];
 
-fn unescape_quoted_string(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let mut chars = s.chars();
-    
-    while let Some(ch) = chars.next() {
-        if ch == '\\' {
-            if let Some(next_ch) = chars.next() {
-                match next_ch {
-                    '"' | '\\' => result.push(next_ch),
-                    _ => {
-                        result.push(ch);
-                        result.push(next_ch);
+    if let Some(quoted) = rest.strip_prefix('"') {
+        let mut out = String::with_capacity(quoted.len());
+        let mut chars = quoted.chars();
+        while let Some(c) = chars.next() {
+            match c {
+                '"' => return Some(out),
+                '\\' => {
+                    if let Some(next) = chars.next() {
+                        out.push(next);
                     }
                 }
-            } else {
-                result.push(ch);
+                _ => out.push(c),
             }
-        } else {
-            result.push(ch);
         }
+        None
+    } else {
+        let end = rest.find(';').unwrap_or(rest.len());
+        let raw = rest[..end].trim();
+        Some(
+            percent_encoding::percent_decode_str(raw)
+                .decode_utf8()
+                .map(|s| s.into_owned())
+                .unwrap_or_else(|_| raw.to_string()),
+        )
     }
-    
-    result
 }
 
-// 创建下载workers
-fn create_workers(file_size: u64, thread_count: u16) -> Vec<WorkerInfo> {
-    let chunk_size = file_size / thread_count as u64;
-    let mut workers = Vec::new();
+fn sanitize_filename(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| {
+            if c.is_control()
+                || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+            {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
 
-    for i in 0..thread_count {
-        let start = i as u64 * chunk_size;
-        let end = if i == thread_count - 1 {
-            file_size
-        } else {
-            (i as u64 + 1) * chunk_size
-        };
-
-        workers.push(WorkerInfo {
-            start_pos: start,
-            current_pos: start,
-            end_pos: end,
-        });
+    let trimmed = cleaned.trim().trim_matches('.').trim_matches('_');
+    if trimmed.is_empty() {
+        "download".to_string()
+    } else {
+        trimmed.to_string()
     }
-
-    workers
 }
 
-// 保存下载状态（断点续传）
-fn save_download_state(state_file: &Path, workers: &[WorkerInfo]) -> Result<()> {
-    let mut file = File::create(state_file)?;
-    
-    for worker in workers {
-        writeln!(file, "{},{},{}", worker.start_pos, worker.current_pos, worker.end_pos)?;
+fn state_file_for(file_path: &Path) -> PathBuf {
+    let mut name = file_path
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    name.push(STATE_SUFFIX);
+    file_path.with_file_name(name)
+}
+
+struct PersistedState {
+    file_size: u64,
+    url: String,
+    workers: Vec<Worker>,
+}
+
+fn save_state(path: &Path, state: &PersistedState) -> Result<()> {
+    let mut f = File::create(path)?;
+    writeln!(f, "v={}", STATE_FORMAT_VERSION)?;
+    writeln!(f, "size={}", state.file_size)?;
+    writeln!(f, "url={}", state.url)?;
+    for w in &state.workers {
+        writeln!(f, "{},{},{}", w.start, w.current, w.end)?;
     }
-    
-    file.flush()?;
-    file.sync_all()?;
+    f.flush()?;
+    f.sync_all()?;
     Ok(())
 }
 
-// 加载下载状态（断点续传）
-fn load_download_state(state_file: &Path) -> Result<Vec<WorkerInfo>> {
-    use std::io::{BufRead, BufReader};
-    let file = File::open(state_file)?;
-    let reader = BufReader::new(file);
+fn load_state(path: &Path) -> Result<PersistedState> {
+    let reader = BufReader::new(File::open(path)?);
+    let mut version: Option<u32> = None;
+    let mut size: Option<u64> = None;
+    let mut url: Option<String> = None;
     let mut workers = Vec::new();
-    
+
     for line in reader.lines() {
         let line = line?;
-        let parts: Vec<&str> = line.split(',').collect();
-        if parts.len() == 3 {
-            workers.push(WorkerInfo {
-                start_pos: parts[0].parse()?,
-                current_pos: parts[1].parse()?,
-                end_pos: parts[2].parse()?,
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(v) = line.strip_prefix("v=") {
+            version = Some(v.parse().context("invalid version")?);
+        } else if let Some(v) = line.strip_prefix("size=") {
+            size = Some(v.parse().context("invalid size")?);
+        } else if let Some(v) = line.strip_prefix("url=") {
+            url = Some(v.to_string());
+        } else {
+            let parts: Vec<&str> = line.split(',').collect();
+            if parts.len() != 3 {
+                bail!("worker line malformed");
+            }
+            workers.push(Worker {
+                start: parts[0].parse()?,
+                current: parts[1].parse()?,
+                end: parts[2].parse()?,
             });
         }
     }
-    
-    Ok(workers)
+
+    if version != Some(STATE_FORMAT_VERSION) {
+        bail!("state version mismatch");
+    }
+    Ok(PersistedState {
+        file_size: size.ok_or_else(|| anyhow!("missing size"))?,
+        url: url.ok_or_else(|| anyhow!("missing url"))?,
+        workers: if workers.is_empty() {
+            bail!("no workers")
+        } else {
+            workers
+        },
+    })
 }
 
-// 获取文件信息 - 增强版，带重试和回退机制
+fn split_workers(file_size: u64, thread_count: u16) -> Vec<Worker> {
+    let threads = thread_count.max(1) as u64;
+    let chunk = file_size / threads;
+    let mut out = Vec::with_capacity(threads as usize);
+    for i in 0..threads {
+        let start = i * chunk;
+        let end = if i == threads - 1 {
+            file_size
+        } else {
+            (i + 1) * chunk
+        };
+        out.push(Worker {
+            start,
+            current: start,
+            end,
+        });
+    }
+    out
+}
+
+fn build_client() -> Result<Client> {
+    Client::builder()
+        .user_agent(USER_AGENT)
+        .connect_timeout(CONNECT_TIMEOUT)
+        .pool_max_idle_per_host(MAX_PARALLEL_WORKERS)
+        .build()
+        .map_err(Into::into)
+}
+
 pub async fn get_file_info(client: &Client, url: &Url) -> Result<(Url, String, u64, bool)> {
-    let mut retries = 0;
-    const MAX_RETRIES: u32 = 3;
-    
+    let mut attempt = 0u32;
     loop {
-        match get_file_info_attempt(client, url).await {
-            Ok(result) => return Ok(result),
+        if cancelled() {
+            bail!(CANCELLED_MSG);
+        }
+        match probe_file_info(client, url).await {
+            Ok(v) => return Ok(v),
             Err(e) => {
-                retries += 1;
-                if retries >= MAX_RETRIES {
+                attempt += 1;
+                if attempt >= FILE_INFO_RETRY_LIMIT {
                     return Err(e);
                 }
-                eprintln!("获取文件信息失败 (重试 {}/{}): {}", retries, MAX_RETRIES, e);
-                tokio::time::sleep(Duration::from_secs(2u64.pow(retries))).await;
+                eprintln!(
+                    "获取文件信息失败({}/{}): {}",
+                    attempt, FILE_INFO_RETRY_LIMIT, e
+                );
+                tokio::time::sleep(Duration::from_secs(1u64 << attempt)).await;
             }
         }
     }
 }
 
-async fn get_file_info_attempt(client: &Client, url: &Url) -> Result<(Url, String, u64, bool)> {
-    // 首先尝试 HEAD 请求
-    let head_result = client
+async fn probe_file_info(client: &Client, url: &Url) -> Result<(Url, String, u64, bool)> {
+    let head = client
         .head(url.as_str())
-        .timeout(Duration::from_secs(10))
+        .timeout(HEAD_TIMEOUT)
         .send()
         .await;
 
-    match head_result {
-        Ok(response) if response.status().is_success() => {
-            let final_url = response.url().clone();
-            let filename = extract_filename_from_response(&response)
+    if let Ok(resp) = head {
+        if resp.status().is_success() {
+            let final_url = resp.url().clone();
+            let name = extract_filename_from_response(&resp)
                 .or_else(|| extract_filename_from_url(&final_url))
                 .unwrap_or_else(|| "download".to_string());
-
-            let supports_range = response.headers()
+            let supports_range = resp
+                .headers()
                 .get("accept-ranges")
                 .and_then(|v| v.to_str().ok())
                 .map(|v| v.contains("bytes"))
                 .unwrap_or(false);
-
-            let file_size = response.headers()
+            let size = resp
+                .headers()
                 .get("content-length")
                 .and_then(|v| v.to_str().ok())
                 .and_then(|s| s.parse::<u64>().ok())
                 .unwrap_or(0);
-
-            Ok((final_url, filename, file_size, supports_range))
-        }
-        _ => {
-            // HEAD 请求失败，尝试使用 GET 请求
-            eprintln!("HEAD 请求失败，尝试 GET 请求");
-            
-            let response = client
-                .get(url.as_str())
-                .header("Range", "bytes=0-0")
-                .timeout(Duration::from_secs(10))
-                .send()
-                .await?;
-
-            let final_url = response.url().clone();
-            let filename = extract_filename_from_response(&response)
-                .or_else(|| extract_filename_from_url(&final_url))
-                .unwrap_or_else(|| "download".to_string());
-
-            let status = response.status();
-            let supports_range = status == StatusCode::PARTIAL_CONTENT
-                || response.headers()
-                    .get("accept-ranges")
-                    .and_then(|v| v.to_str().ok())
-                    .map(|v| v.contains("bytes"))
-                    .unwrap_or(false);
-
-            let file_size = if status == StatusCode::PARTIAL_CONTENT {
-                response.headers()
-                    .get("content-range")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|s| s.split('/').last())
-                    .and_then(|size| size.parse::<u64>().ok())
-                    .unwrap_or(0)
-            } else {
-                response.headers()
-                    .get("content-length")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(0)
-            };
-
-            Ok((final_url, filename, file_size, supports_range))
+            return Ok((final_url, name, size, supports_range));
         }
     }
-}
 
-// 下载chunk的一部分（增强版）
-async fn download_chunk_part(
-    client: &Client,
-    url: &Url,
-    file: Arc<Mutex<File>>,
-    worker: &mut WorkerInfo,
-    worker_id: usize,
-    progress_tx: &mpsc::Sender<ProgressUpdate>,
-) -> Result<()> {
-    // 检查是否已经下载完成
-    if worker.current_pos >= worker.end_pos {
-        return Ok(());
-    }
-    
-    let range = format!("bytes={}-{}", worker.current_pos, worker.end_pos - 1);
+    eprintln!("HEAD 不可用，回退到 GET Range");
 
-    let response = client
+    let resp = client
         .get(url.as_str())
-        .header("Range", range.clone())
-        .timeout(Duration::from_secs(60))
+        .header("Range", "bytes=0-0")
+        .timeout(HEAD_TIMEOUT)
         .send()
         .await?;
 
-    let status = response.status();
-    
-    // 处理各种响应状态
-    match status {
-        StatusCode::PARTIAL_CONTENT => {
-            // 正常的分块响应
-        }
-        StatusCode::OK => {
-            // 服务器可能不支持 Range，但返回了完整内容
-            eprintln!("警告: 服务器返回了完整内容而不是部分内容，worker {}", worker_id);
-            if worker.current_pos > 0 {
-                anyhow::bail!("服务器不支持断点续传");
-            }
-        }
-        StatusCode::RANGE_NOT_SATISFIABLE => {
-            eprintln!("警告: Range 不可满足，可能文件已完成下载，worker {}", worker_id);
-            return Ok(());
-        }
-        _ => {
-            anyhow::bail!("服务器拒绝Range请求: {} for range: {}", status, range);
-        }
-    }
+    let final_url = resp.url().clone();
+    let name = extract_filename_from_response(&resp)
+        .or_else(|| extract_filename_from_url(&final_url))
+        .unwrap_or_else(|| "download".to_string());
 
-    let mut stream = response.bytes_stream();
-    let mut write_position = worker.current_pos;
-    const BUFFER_SIZE: usize = 16384; // 16KB 缓冲区
+    let status = resp.status();
+    let supports_range = status == StatusCode::PARTIAL_CONTENT
+        || resp
+            .headers()
+            .get("accept-ranges")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.contains("bytes"))
+            .unwrap_or(false);
 
-    while let Some(chunk_result) = stream.next().await {
-        let chunk = match chunk_result {
-            Ok(chunk) => chunk,
-            Err(e) => {
-                eprintln!("读取数据块错误 (worker {}): {}", worker_id, e);
-                anyhow::bail!("读取数据失败: {}", e);
-            }
-        };
-        
-        let chunk_len = chunk.len() as u64;
+    let size = if status == StatusCode::PARTIAL_CONTENT {
+        resp.headers()
+            .get("content-range")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.rsplit('/').next())
+            .and_then(|n| n.parse::<u64>().ok())
+            .unwrap_or(0)
+    } else {
+        resp.headers()
+            .get("content-length")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
 
-        // 检查是否会超出边界
-        if write_position + chunk_len > worker.end_pos {
-            let actual_len = (worker.end_pos - write_position) as usize;
-            let mut file_guard = file.lock().await;
-            file_guard.seek(SeekFrom::Start(write_position))?;
-            file_guard.write_all(&chunk[..actual_len])?;
-            file_guard.flush()?;
-            drop(file_guard);
-            
-            worker.current_pos = worker.end_pos;
-            
-            progress_tx.send(ProgressUpdate {
-                worker_id,
-                bytes_downloaded: actual_len as u64,
-                timestamp: Instant::now(),
-            }).await.ok();
-            
-            break;
-        }
-
-        // 写入文件并确保数据刷新到磁盘
-        let mut file_guard = file.lock().await;
-        file_guard.seek(SeekFrom::Start(write_position))?;
-        file_guard.write_all(&chunk)?;
-        
-        // 每写入一定量的数据就刷新
-        if write_position % (BUFFER_SIZE as u64 * 64) == 0 {
-            file_guard.flush()?;
-        }
-        drop(file_guard);
-
-        write_position += chunk_len;
-        worker.current_pos = write_position;
-
-        progress_tx.send(ProgressUpdate {
-            worker_id,
-            bytes_downloaded: chunk_len,
-            timestamp: Instant::now(),
-        }).await.ok();
-    }
-
-    // 确保最后的数据都写入
-    let mut file_guard = file.lock().await;
-    file_guard.flush()?;
-    drop(file_guard);
-
-    Ok(())
+    Ok((final_url, name, size, supports_range))
 }
 
-// 下载一个chunk（增强版）
-async fn download_chunk(
+fn emit_progress(config: &DownloadConfig, info: DownloadInfo) {
+    if let Some(app) = &config.app_handle {
+        if let Some(win) = app.get_webview_window("main") {
+            let _ = win.emit("download://progress", &info);
+        }
+    }
+}
+
+fn report_progress(config: &DownloadConfig, percent: f64, speed_mb: f64, finished: bool) {
+    match config.event_type {
+        DownloadEventType::FileDownload | DownloadEventType::PluginDownload => {
+            let info = DownloadInfo {
+                progress: if finished {
+                    "100%".to_string()
+                } else {
+                    format!("{:.1}%", percent)
+                },
+                speed: if finished {
+                    "0.00MB/s".to_string()
+                } else {
+                    format!("{:.2}MB/s", speed_mb)
+                },
+                downloading: !finished,
+            };
+            emit_progress(config, info);
+        }
+        DownloadEventType::UpdateDownload => {
+            let status = DownloadStatus {
+                progress: if finished {
+                    100
+                } else {
+                    percent.clamp(0.0, 100.0) as u64
+                },
+                speed: if finished {
+                    "0.00".to_string()
+                } else {
+                    format!("{:.2}", speed_mb)
+                },
+            };
+            if matches!(config.event_type, DownloadEventType::UpdateDownload) {
+                println!(
+                    "下载进度: {}% | 速度: {} MB/s",
+                    status.progress, status.speed
+                );
+            }
+            set_update_status(Some(status));
+        }
+    }
+}
+
+async fn fetch_chunk(
     client: &Client,
     url: &Url,
-    file: Arc<Mutex<File>>,
-    mut worker: WorkerInfo,
-    worker_id: usize,
-    progress_tx: mpsc::Sender<ProgressUpdate>,
-    worker_tx: mpsc::Sender<(usize, WorkerInfo)>,
+    file: &Arc<Mutex<File>>,
+    worker: &mut Worker,
+    progress_tx: &mpsc::UnboundedSender<u64>,
 ) -> Result<()> {
-    let mut retry_count = 0;
-    const MAX_RETRIES: u32 = 10;
-    const INITIAL_RETRY_DELAY: u64 = 2;
+    if worker.done() {
+        return Ok(());
+    }
 
-    while worker.current_pos < worker.end_pos {
-        match download_chunk_part(client, url, file.clone(), &mut worker, worker_id, &progress_tx).await {
-            Ok(_) => {
-                retry_count = 0;
-                worker_tx.send((worker_id, worker.clone())).await.ok();
-                
-                // 如果下载完成，退出循环
-                if worker.current_pos >= worker.end_pos {
-                    break;
-                }
+    let range = format!("bytes={}-{}", worker.current, worker.end - 1);
+    let resp = client
+        .get(url.as_str())
+        .header("Range", &range)
+        .timeout(CHUNK_TIMEOUT)
+        .send()
+        .await?;
+
+    match resp.status() {
+        StatusCode::PARTIAL_CONTENT => {}
+        StatusCode::OK => bail!("服务器不支持断点续传（返回完整内容）"),
+        StatusCode::RANGE_NOT_SATISFIABLE => return Ok(()),
+        s => bail!("服务器拒绝 Range 请求: {} ({})", s, range),
+    }
+
+    let mut stream = resp.bytes_stream();
+    let mut pending_flush: u64 = 0;
+
+    while let Some(chunk) = stream.next().await {
+        if cancelled() {
+            bail!(CANCELLED_MSG);
+        }
+        let chunk = chunk.map_err(|e| anyhow!("读取数据失败: {}", e))?;
+        if chunk.is_empty() {
+            continue;
+        }
+
+        let remaining = worker.end - worker.current;
+        let take = (chunk.len() as u64).min(remaining) as usize;
+        let payload = &chunk[..take];
+
+        {
+            let mut f = file.lock().await;
+            f.seek(SeekFrom::Start(worker.current))?;
+            f.write_all(payload)?;
+            pending_flush += take as u64;
+            if pending_flush >= FLUSH_INTERVAL_BYTES {
+                f.flush()?;
+                pending_flush = 0;
             }
-            Err(e) => {
-                retry_count += 1;
-                eprintln!(
-                    "Worker {} 下载失败 (重试 {}/{}): {}", 
-                    worker_id, retry_count, MAX_RETRIES, e
-                );
-                
-                if retry_count >= MAX_RETRIES {
-                    return Err(e);
-                }
-                
-                // 指数退避重试延迟
-                let delay = Duration::from_secs(INITIAL_RETRY_DELAY.pow(retry_count.min(5)));
-                tokio::time::sleep(delay).await;
-            }
+        }
+
+        worker.current += take as u64;
+        let _ = progress_tx.send(take as u64);
+
+        if worker.done() {
+            break;
         }
     }
 
-    eprintln!("Worker {} 完成下载", worker_id);
+    {
+        let mut f = file.lock().await;
+        f.flush()?;
+    }
+
     Ok(())
 }
 
-// 发送下载事件
-fn emit_download_event(config: &DownloadConfig, event: DownloadEvent) {
-    match event {
-        DownloadEvent::Progress(info) => {
-            if let Some(app) = &config.app_handle {
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.emit("download://progress", &info);
+async fn run_worker(
+    client: Client,
+    url: Url,
+    file: Arc<Mutex<File>>,
+    mut worker: Worker,
+    worker_id: usize,
+    progress_tx: mpsc::UnboundedSender<u64>,
+    worker_tx: mpsc::UnboundedSender<(usize, Worker)>,
+    semaphore: Arc<Semaphore>,
+) -> Result<()> {
+    let _permit = semaphore
+        .acquire_owned()
+        .await
+        .map_err(|e| anyhow!("信号量错误: {}", e))?;
+
+    let mut attempt: u32 = 0;
+    while !worker.done() {
+        if cancelled() {
+            bail!(CANCELLED_MSG);
+        }
+        match fetch_chunk(&client, &url, &file, &mut worker, &progress_tx).await {
+            Ok(()) => {
+                attempt = 0;
+                let _ = worker_tx.send((worker_id, worker));
+            }
+            Err(e) => {
+                if cancelled() {
+                    return Err(e);
                 }
+                attempt += 1;
+                if attempt >= CHUNK_RETRY_LIMIT {
+                    return Err(e);
+                }
+                eprintln!(
+                    "worker {} 第 {}/{} 次重试: {}",
+                    worker_id, attempt, CHUNK_RETRY_LIMIT, e
+                );
+                let backoff = 1u64 << attempt.min(5);
+                tokio::time::sleep(Duration::from_secs(backoff)).await;
             }
         }
-        DownloadEvent::UpdateProgress(status) => {
-            let mut global_status = UPDATE_DOWNLOAD_STATUS.lock().unwrap();
-            *global_status = Some(status);
-        }
     }
+    Ok(())
 }
 
-// 构建增强的 HTTP 客户端
-fn build_client() -> Result<Client> {
-    let mut headers = HeaderMap::new();
-    headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip, deflate, br"));
-    
-    let client = Client::builder()
-        .user_agent(USER_AGENT)
-        .default_headers(headers)
-        .connect_timeout(Duration::from_secs(30))
-        .timeout(Duration::from_secs(300)) // 5分钟总超时
-        .pool_max_idle_per_host(16)
-        .danger_accept_invalid_certs(true) // 接受无效证书
-        .build()?;
-    
-    Ok(client)
-}
-
-// 多线程下载实现（增强版）
-async fn multi_thread_download_impl(
-    config: DownloadConfig,
+async fn multi_thread_download(
+    config: &DownloadConfig,
     client: &Client,
     url: &Url,
     file_path: &Path,
     file_size: u64,
-    workers: Vec<WorkerInfo>,
+    workers: Vec<Worker>,
 ) -> Result<String> {
-    let state_file = file_path.with_extension("download");
-    
+    let state_path = state_file_for(file_path);
+
     let file = if file_path.exists() {
-        OpenOptions::new()
-            .write(true)
-            .read(true)
-            .open(file_path)?
+        let f = OpenOptions::new().read(true).write(true).open(file_path)?;
+        if f.metadata()?.len() != file_size {
+            f.set_len(file_size)?;
+        }
+        f
     } else {
-        let file = File::create(file_path)?;
-        file.set_len(file_size)?;
-        file.sync_all()?; // 确保文件系统元数据更新
-        file
+        let f = File::create(file_path)?;
+        f.set_len(file_size)?;
+        f.sync_all()?;
+        f
     };
-
     let file = Arc::new(Mutex::new(file));
-    let workers_state = Arc::new(Mutex::new(workers.clone()));
 
-    let mut already_downloaded = 0u64;
-    for worker in &workers {
-        already_downloaded += worker.current_pos - worker.start_pos;
-    }
+    let workers_arc = Arc::new(Mutex::new(workers.clone()));
+    let already: u64 = workers.iter().map(|w| w.current - w.start).sum();
+    let total = Arc::new(AtomicU64::new(already));
 
-    let total_downloaded = Arc::new(AtomicU64::new(already_downloaded));
-    let (progress_tx, mut progress_rx) = mpsc::channel::<ProgressUpdate>(10000);
+    let (progress_tx, progress_rx) = mpsc::unbounded_channel::<u64>();
+    let (worker_tx, worker_rx) = mpsc::unbounded_channel::<(usize, Worker)>();
+    let (stop_tx, stop_rx) = mpsc::channel::<()>(1);
 
-    // 启动进度显示任务
-    let progress_handle = {
-        let total_downloaded_clone = total_downloaded.clone();
-        let workers_state_clone = workers_state.clone();
-        let state_file_clone = state_file.to_path_buf();
-        let config_clone = config.clone();
+    let progress_task = spawn_progress_task(
+        config.clone(),
+        total.clone(),
+        workers_arc.clone(),
+        state_path.clone(),
+        file_size,
+        progress_rx,
+        stop_rx,
+    );
 
-        tokio::spawn(async move {
-            let mut interval = interval(Duration::from_millis(100));
-            let mut last_save = Instant::now();
-            let start_time = Instant::now();
-            
-            let mut speed_history: Vec<(Instant, u64)> = Vec::new();
-            const SPEED_WINDOW: Duration = Duration::from_secs(2);
-            
-            loop {
-                interval.tick().await;
-                
-                let now = Instant::now();
-                let mut updates_processed = 0;
-                let mut bytes_in_batch = 0u64;
-                
-                while let Ok(update) = progress_rx.try_recv() {
-                    bytes_in_batch += update.bytes_downloaded;
-                    updates_processed += 1;
-                    
-                    if updates_processed >= 1000 {
-                        break;
-                    }
-                }
-                
-                if bytes_in_batch > 0 {
-                    total_downloaded_clone.fetch_add(bytes_in_batch, Ordering::Relaxed);
-                    let current_total = total_downloaded_clone.load(Ordering::Relaxed);
-                    
-                    speed_history.push((now, current_total));
-                    speed_history.retain(|(t, _)| now.duration_since(*t) < SPEED_WINDOW);
-                }
-                
-                if now.duration_since(start_time).as_millis() % 250 < 100 {
-                    let current_total = total_downloaded_clone.load(Ordering::Relaxed);
-                    
-                    let speed = if speed_history.len() >= 2 {
-                        let oldest = speed_history.first().unwrap();
-                        let time_diff = now.duration_since(oldest.0).as_secs_f64();
-                        if time_diff > 0.0 {
-                            let bytes_diff = current_total.saturating_sub(oldest.1) as f64;
-                            bytes_diff / time_diff / (1024.0 * 1024.0)
-                        } else {
-                            0.0
-                        }
-                    } else {
-                        0.0
-                    };
-
-                    let display_speed = speed;
-                    let progress = (current_total as f64 / file_size as f64) * 100.0;
-                    
-                    // 根据事件类型发送不同的事件
-                    match config_clone.event_type {
-                        DownloadEventType::FileDownload | DownloadEventType::PluginDownload => {
-                            let info = DownloadInfo {
-                                progress: format!("{:.1}%", progress),
-                                speed: format!("{:.2}MB/s", display_speed),
-                                downloading: true,
-                            };
-                            emit_download_event(&config_clone, DownloadEvent::Progress(info));
-                        }
-                        DownloadEventType::UpdateDownload => {
-                            let status = DownloadStatus {
-                                progress: progress as u64,
-                                speed: format!("{:.2}", display_speed),
-                            };
-                            emit_download_event(&config_clone, DownloadEvent::UpdateProgress(status));
-                            
-                            println!(
-                                "下载进度: {}% | 速度: {:.2} MB/s | 已下载: {:.2} MB / {:.2} MB",
-                                progress as u64,
-                                display_speed,
-                                current_total as f64 / 1024.0 / 1024.0,
-                                file_size as f64 / 1024.0 / 1024.0
-                            );
-                        }
-                    }
-                }
-                
-                if last_save.elapsed() >= Duration::from_secs(30) {
-                    let workers = workers_state_clone.lock().await;
-                    save_download_state(&state_file_clone, &*workers).ok();
-                    last_save = Instant::now();
-                }
-                
-                let current_total = total_downloaded_clone.load(Ordering::Relaxed);
-                
-                if current_total >= file_size {
-                    // 发送完成事件
-                    match config_clone.event_type {
-                        DownloadEventType::FileDownload | DownloadEventType::PluginDownload => {
-                            let final_info = DownloadInfo {
-                                progress: "100%".to_string(),
-                                speed: "0MB/s".to_string(),
-                                downloading: false,
-                            };
-                            emit_download_event(&config_clone, DownloadEvent::Progress(final_info));
-                        }
-                        DownloadEventType::UpdateDownload => {
-                            let final_status = DownloadStatus {
-                                progress: 100,
-                                speed: "0.00".to_string(),
-                            };
-                            emit_download_event(&config_clone, DownloadEvent::UpdateProgress(final_status));
-                        }
-                    }
-                    break;
-                }
-            }
-        })
-    };
-
-    let (worker_tx, mut worker_rx) = mpsc::channel::<(usize, WorkerInfo)>(100);
-
-    let workers_state_clone = workers_state.clone();
-    let worker_task = tokio::spawn(async move {
-        while let Some((idx, worker_info)) = worker_rx.recv().await {
-            let mut workers = workers_state_clone.lock().await;
-            if idx < workers.len() {
-                workers[idx] = worker_info;
+    let workers_state = workers_arc.clone();
+    let worker_collector = tokio::spawn(async move {
+        let mut rx = worker_rx;
+        while let Some((idx, w)) = rx.recv().await {
+            let mut state = workers_state.lock().await;
+            if idx < state.len() {
+                state[idx] = w;
             }
         }
     });
 
-    let semaphore = Arc::new(Semaphore::new(workers.len().min(16))); // 限制并发数
-    let mut tasks = Vec::new();
-
+    let semaphore = Arc::new(Semaphore::new(workers.len().min(MAX_PARALLEL_WORKERS)));
+    let mut tasks = Vec::with_capacity(workers.len());
     for (i, worker) in workers.into_iter().enumerate() {
-        if worker.current_pos >= worker.end_pos {
+        if worker.done() {
             continue;
         }
-
         let client = client.clone();
         let url = url.clone();
         let file = file.clone();
-        let semaphore = semaphore.clone();
         let progress_tx = progress_tx.clone();
         let worker_tx = worker_tx.clone();
-
-        let task = tokio::spawn(async move {
-            let _permit = semaphore.acquire().await?;
-            download_chunk(
-                &client,
-                &url,
-                file,
-                worker,
-                i,
-                progress_tx,
-                worker_tx,
-            ).await
-        });
-
-        tasks.push(task);
-    }
-
-    // 等待所有任务完成
-    let mut download_errors = Vec::new();
-    for (i, task) in tasks.into_iter().enumerate() {
-        match task.await {
-            Ok(Ok(_)) => {}
-            Ok(Err(e)) => {
-                eprintln!("下载任务 {} 失败: {}", i, e);
-                download_errors.push(e);
-            }
-            Err(e) => {
-                eprintln!("下载任务 {} 异常终止: {}", i, e);
-                download_errors.push(anyhow::anyhow!("任务异常终止: {}", e));
-            }
-        }
-    }
-
-    if !download_errors.is_empty() {
-        return Err(anyhow::anyhow!("部分下载任务失败: {:?}", download_errors));
+        let sem = semaphore.clone();
+        tasks.push(tokio::spawn(async move {
+            run_worker(client, url, file, worker, i, progress_tx, worker_tx, sem).await
+        }));
     }
 
     drop(progress_tx);
     drop(worker_tx);
-    worker_task.await?;
 
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    progress_handle.abort();
-
-    // 验证文件完整性
-    {
-        let file_guard = file.lock().await;
-        file_guard.sync_all()?; // 确保所有数据都已写入磁盘
-        let metadata = file_guard.metadata()?;
-        if metadata.len() != file_size {
-            anyhow::bail!("文件大小不匹配：期望 {} 字节，实际 {} 字节", file_size, metadata.len());
+    let mut errors: Vec<anyhow::Error> = Vec::new();
+    for (i, task) in tasks.into_iter().enumerate() {
+        match task.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                eprintln!("worker {} 失败: {}", i, e);
+                errors.push(e);
+            }
+            Err(e) => {
+                errors.push(anyhow!("worker {} 异常终止: {}", i, e));
+            }
         }
     }
 
-    // 删除状态文件
-    std::fs::remove_file(&state_file).ok();
+    let _ = stop_tx.send(()).await;
+    let _ = progress_task.await;
+    let _ = worker_collector.await;
 
+    if cancelled() {
+        let workers = workers_arc.lock().await;
+        let snapshot = PersistedState {
+            file_size,
+            url: url.to_string(),
+            workers: workers.clone(),
+        };
+        let _ = save_state(&state_path, &snapshot);
+        bail!(CANCELLED_MSG);
+    }
+
+    if !errors.is_empty() {
+        let workers = workers_arc.lock().await;
+        let snapshot = PersistedState {
+            file_size,
+            url: url.to_string(),
+            workers: workers.clone(),
+        };
+        let _ = save_state(&state_path, &snapshot);
+        return Err(anyhow!(
+            "下载失败（{} 个分片错误），首个错误: {}",
+            errors.len(),
+            errors[0]
+        ));
+    }
+
+    {
+        let f = file.lock().await;
+        f.sync_all()?;
+        let meta = f.metadata()?;
+        if meta.len() != file_size {
+            bail!(
+                "文件大小不匹配：期望 {} 字节，实际 {} 字节",
+                file_size,
+                meta.len()
+            );
+        }
+    }
+
+    let _ = std::fs::remove_file(&state_path);
+    report_progress(config, 100.0, 0.0, true);
     Ok(file_path.display().to_string())
 }
 
-// 单线程下载实现（增强版）
-async fn single_thread_download_impl(
+fn spawn_progress_task(
     config: DownloadConfig,
+    total: Arc<AtomicU64>,
+    workers: Arc<Mutex<Vec<Worker>>>,
+    state_path: PathBuf,
+    file_size: u64,
+    mut progress_rx: mpsc::UnboundedReceiver<u64>,
+    mut stop_rx: mpsc::Receiver<()>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut tick = interval(TICK_INTERVAL);
+        let mut last_emit = Instant::now() - EMIT_INTERVAL;
+        let mut last_save = Instant::now();
+        let mut history: Vec<(Instant, u64)> = Vec::with_capacity(32);
+        let url_str = config.url.clone();
+
+        loop {
+            tokio::select! {
+                _ = stop_rx.recv() => break,
+                _ = tick.tick() => {}
+            }
+
+            let mut received: u64 = 0;
+            while let Ok(n) = progress_rx.try_recv() {
+                received += n;
+            }
+            if received > 0 {
+                total.fetch_add(received, Ordering::Relaxed);
+            }
+
+            let now = Instant::now();
+            let current = total.load(Ordering::Relaxed);
+
+            history.push((now, current));
+            history.retain(|(t, _)| now.duration_since(*t) <= SPEED_WINDOW);
+
+            if now.duration_since(last_emit) >= EMIT_INTERVAL {
+                let speed = if let Some(oldest) = history.first() {
+                    let dt = now.duration_since(oldest.0).as_secs_f64();
+                    if dt > 0.0 {
+                        (current.saturating_sub(oldest.1) as f64) / dt / (1024.0 * 1024.0)
+                    } else {
+                        0.0
+                    }
+                } else {
+                    0.0
+                };
+
+                let percent = if file_size > 0 {
+                    (current as f64 / file_size as f64) * 100.0
+                } else {
+                    0.0
+                };
+                report_progress(&config, percent.min(99.9), speed, false);
+                last_emit = now;
+            }
+
+            if now.duration_since(last_save) >= STATE_SAVE_INTERVAL {
+                let snapshot = {
+                    let guard = workers.lock().await;
+                    PersistedState {
+                        file_size,
+                        url: url_str.clone(),
+                        workers: guard.clone(),
+                    }
+                };
+                let _ = save_state(&state_path, &snapshot);
+                last_save = now;
+            }
+
+            if file_size > 0 && current >= file_size {
+                break;
+            }
+        }
+    })
+}
+
+async fn single_thread_download(
+    config: &DownloadConfig,
     client: &Client,
     url: &Url,
     file_path: &Path,
+    expected_size: u64,
 ) -> Result<String> {
-    let mut retries = 0;
-    const MAX_RETRIES: u32 = 5;
-    
+    let mut attempt: u32 = 0;
+    let mut resume_from: u64 = 0;
+
     loop {
-        match single_thread_download_attempt(config.clone(), client, url, file_path).await {
-            Ok(result) => return Ok(result),
+        if cancelled() {
+            bail!(CANCELLED_MSG);
+        }
+        match single_thread_attempt(config, client, url, file_path, expected_size, resume_from)
+            .await
+        {
+            Ok(out) => return Ok(out),
             Err(e) => {
-                retries += 1;
-                if retries >= MAX_RETRIES {
+                if cancelled() {
                     return Err(e);
                 }
-                eprintln!("单线程下载失败 (重试 {}/{}): {}", retries, MAX_RETRIES, e);
-                tokio::time::sleep(Duration::from_secs(2u64.pow(retries))).await;
+                attempt += 1;
+                if attempt >= SINGLE_THREAD_RETRY_LIMIT {
+                    return Err(e);
+                }
+                eprintln!(
+                    "单线程下载失败({}/{}): {}",
+                    attempt, SINGLE_THREAD_RETRY_LIMIT, e
+                );
+                resume_from = std::fs::metadata(file_path).map(|m| m.len()).unwrap_or(0);
+                tokio::time::sleep(Duration::from_secs(1u64 << attempt.min(5))).await;
             }
         }
     }
 }
 
-async fn single_thread_download_attempt(
-    config: DownloadConfig,
+async fn single_thread_attempt(
+    config: &DownloadConfig,
     client: &Client,
     url: &Url,
     file_path: &Path,
+    expected_size: u64,
+    resume_from: u64,
 ) -> Result<String> {
-    let response = client
-        .get(url.as_str())
-        .timeout(Duration::from_secs(300))
-        .send()
-        .await?;
-
-    if !response.status().is_success() {
-        anyhow::bail!("下载失败: {}", response.status());
+    let mut request = client.get(url.as_str()).timeout(CHUNK_TIMEOUT);
+    let resuming = resume_from > 0 && expected_size > 0 && resume_from < expected_size;
+    if resuming {
+        request = request.header("Range", format!("bytes={}-", resume_from));
     }
 
-    let total_size = response.headers()
-        .get("content-length")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<u64>().ok());
+    let resp = request.send().await?;
+    let status = resp.status();
+    if !status.is_success() && status != StatusCode::PARTIAL_CONTENT {
+        bail!("下载失败: {}", status);
+    }
 
-    let mut file = File::create(file_path)?;
-    let mut stream = response.bytes_stream();
-    let mut downloaded = 0u64;
-    let _start_time = Instant::now();
-    
-    let mut speed_history: Vec<(Instant, u64)> = Vec::new();
-    const SPEED_WINDOW: Duration = Duration::from_secs(2);
-    let mut last_update = Instant::now();
-    const BUFFER_SIZE: usize = 16384; // 16KB 缓冲区
+    let actual_resume = resuming && status == StatusCode::PARTIAL_CONTENT;
+    let mut file = if actual_resume {
+        OpenOptions::new().write(true).read(true).open(file_path)?
+    } else {
+        File::create(file_path)?
+    };
+    let mut downloaded: u64 = if actual_resume { resume_from } else { 0 };
+    if actual_resume {
+        file.seek(SeekFrom::Start(downloaded))?;
+    }
 
-    while let Some(chunk_result) = stream.next().await {
-        let chunk = match chunk_result {
-            Ok(chunk) => chunk,
-            Err(e) => {
-                eprintln!("读取数据块错误: {}", e);
-                anyhow::bail!("下载中断: {}", e);
-            }
-        };
-        
-        file.write_all(&chunk)?;
-        
-        // 定期刷新到磁盘
-        if downloaded % (BUFFER_SIZE as u64 * 64) == 0 {
+    let total_size = if expected_size > 0 {
+        expected_size
+    } else {
+        resp.headers()
+            .get("content-length")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok())
+            .map(|n| n + downloaded)
+            .unwrap_or(0)
+    };
+
+    let mut stream = resp.bytes_stream();
+    let mut history: Vec<(Instant, u64)> = Vec::with_capacity(32);
+    let mut last_emit = Instant::now() - EMIT_INTERVAL;
+    let mut pending_flush: u64 = 0;
+
+    while let Some(chunk) = stream.next().await {
+        if cancelled() {
             file.flush()?;
+            bail!(CANCELLED_MSG);
         }
-        
+        let chunk = chunk.map_err(|e| anyhow!("下载中断: {}", e))?;
+        if chunk.is_empty() {
+            continue;
+        }
+        file.write_all(&chunk)?;
         downloaded += chunk.len() as u64;
+        pending_flush += chunk.len() as u64;
+        if pending_flush >= FLUSH_INTERVAL_BYTES {
+            file.flush()?;
+            pending_flush = 0;
+        }
+
         let now = Instant::now();
+        history.push((now, downloaded));
+        history.retain(|(t, _)| now.duration_since(*t) <= SPEED_WINDOW);
 
-        speed_history.push((now, downloaded));
-        speed_history.retain(|(t, _)| now.duration_since(*t) < SPEED_WINDOW);
-
-        if now.duration_since(last_update) >= Duration::from_millis(250) {
-            let speed = if speed_history.len() >= 2 {
-                let oldest = speed_history.first().unwrap();
-                let time_diff = now.duration_since(oldest.0).as_secs_f64();
-                if time_diff > 0.0 {
-                    let bytes_diff = (downloaded - oldest.1) as f64;
-                    bytes_diff / time_diff / (1024.0 * 1024.0)
+        if now.duration_since(last_emit) >= EMIT_INTERVAL {
+            let speed = if let Some(oldest) = history.first() {
+                let dt = now.duration_since(oldest.0).as_secs_f64();
+                if dt > 0.0 {
+                    (downloaded.saturating_sub(oldest.1) as f64) / dt / (1024.0 * 1024.0)
                 } else {
                     0.0
                 }
             } else {
                 0.0
             };
-
-            let display_speed = speed;
-
-            if let Some(total) = total_size {
-                let progress = (downloaded as f64 / total as f64) * 100.0;
-                
-                // 根据事件类型发送不同的事件
-                match config.event_type {
-                    DownloadEventType::FileDownload | DownloadEventType::PluginDownload => {
-                        let info = DownloadInfo {
-                            progress: format!("{:.0}%", progress),
-                            speed: format!("{:.2}MB/s", display_speed),
-                            downloading: true,
-                        };
-                        emit_download_event(&config, DownloadEvent::Progress(info));
-                    }
-                    DownloadEventType::UpdateDownload => {
-                        let status = DownloadStatus {
-                            progress: progress as u64,
-                            speed: format!("{:.2}", display_speed),
-                        };
-                        emit_download_event(&config, DownloadEvent::UpdateProgress(status));
-                        
-                        println!(
-                            "下载进度: {}% | 速度: {:.2} MB/s | {}/{} MB",
-                            progress as u64, display_speed, downloaded / 1048576, total / 1048576
-                        );
-                    }
-                }
-            }
-            last_update = now;
+            let percent = if total_size > 0 {
+                (downloaded as f64 / total_size as f64) * 100.0
+            } else {
+                0.0
+            };
+            report_progress(config, percent.min(99.9), speed, false);
+            last_emit = now;
         }
     }
 
-    // 确保数据写入磁盘
     file.flush()?;
     file.sync_all()?;
 
-    // 发送完成状态
-    match config.event_type {
-        DownloadEventType::FileDownload | DownloadEventType::PluginDownload => {
-            let final_info = DownloadInfo {
-                progress: "100%".to_string(),
-                speed: "0.00MB/s".to_string(),
-                downloading: false,
-            };
-            emit_download_event(&config, DownloadEvent::Progress(final_info));
-        }
-        DownloadEventType::UpdateDownload => {
-            let final_status = DownloadStatus {
-                progress: 100,
-                speed: "0.00".to_string(),
-            };
-            emit_download_event(&config, DownloadEvent::UpdateProgress(final_status));
-        }
+    if total_size > 0 && downloaded != total_size {
+        bail!(
+            "文件大小不匹配：期望 {} 字节，实际 {} 字节",
+            total_size,
+            downloaded
+        );
     }
 
+    report_progress(config, 100.0, 0.0, true);
     Ok(file_path.display().to_string())
 }
 
-// 通用下载接口
 pub async fn download(config: DownloadConfig) -> Result<String> {
+    reset_cancel();
+
     let url = Url::parse(&config.url)?;
     let save_path = &config.save_path;
 
     if let Some(parent) = save_path.parent() {
-        std::fs::create_dir_all(parent)?;
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
     }
 
     let client = build_client()?;
-
-    let (final_url, filename, file_size, supports_range) = get_file_info(&client, &url).await?;
-
-    let final_filename = if save_path.is_dir() {
-        filename
-    } else {
-        save_path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string()
-    };
+    let (final_url, raw_name, file_size, supports_range) = get_file_info(&client, &url).await?;
+    let server_name = sanitize_filename(&raw_name);
 
     let file_path = if save_path.is_dir() {
-        save_path.join(&final_filename)
+        save_path.join(&server_name)
     } else {
         save_path.to_path_buf()
     };
 
-    // 发送初始进度事件
-    if matches!(config.event_type, DownloadEventType::FileDownload) {
-        let initial_info = DownloadInfo {
-            progress: "0%".to_string(),
-            speed: "0.00MB/s".to_string(),
-            downloading: true,
-        };
-        emit_download_event(&config, DownloadEvent::Progress(initial_info));
-        tokio::time::sleep(Duration::from_millis(100)).await;
+    if matches!(
+        config.event_type,
+        DownloadEventType::FileDownload | DownloadEventType::PluginDownload
+    ) {
+        emit_progress(
+            &config,
+            DownloadInfo {
+                progress: "0.0%".to_string(),
+                speed: "0.00MB/s".to_string(),
+                downloading: true,
+            },
+        );
     }
 
-    if !supports_range || file_size == 0 || config.thread_count == 1 {
-        eprintln!("使用单线程下载模式");
-        return single_thread_download_impl(config, &client, &final_url, &file_path).await;
-    }
+    let single_thread =
+        !supports_range || file_size == 0 || config.thread_count <= 1;
 
-    eprintln!("使用多线程下载模式，线程数: {}", config.thread_count);
-    
-    let state_file = file_path.with_extension("download");
-    let workers = if state_file.exists() {
-        match load_download_state(&state_file) {
-            Ok(saved_workers) => {
-                eprintln!("从状态文件恢复下载进度");
-                saved_workers
-            }
-            Err(e) => {
-                eprintln!("加载状态文件失败: {}，重新开始下载", e);
-                create_workers(file_size, config.thread_count)
-            }
-        }
+    let result = if single_thread {
+        eprintln!("单线程下载");
+        single_thread_download(&config, &client, &final_url, &file_path, file_size).await
     } else {
-        create_workers(file_size, config.thread_count)
+        eprintln!("多线程下载 ({} 线程)", config.thread_count);
+        let state_path = state_file_for(&file_path);
+        let workers = load_workers_for_resume(&state_path, &final_url, file_size)
+            .unwrap_or_else(|| split_workers(file_size, config.thread_count));
+        multi_thread_download(&config, &client, &final_url, &file_path, file_size, workers).await
     };
 
-    multi_thread_download_impl(
-        config,
-        &client,
-        &final_url,
-        &file_path,
-        file_size,
-        workers,
-    ).await
+    if result.is_err()
+        && matches!(
+            config.event_type,
+            DownloadEventType::FileDownload | DownloadEventType::PluginDownload
+        )
+    {
+        emit_progress(
+            &config,
+            DownloadInfo {
+                progress: "0.0%".to_string(),
+                speed: "0.00MB/s".to_string(),
+                downloading: false,
+            },
+        );
+    }
+
+    result
 }
 
-// 导出的公共函数
+fn load_workers_for_resume(
+    state_path: &Path,
+    final_url: &Url,
+    file_size: u64,
+) -> Option<Vec<Worker>> {
+    if !state_path.exists() {
+        return None;
+    }
+    match load_state(state_path) {
+        Ok(saved) => {
+            if saved.file_size != file_size {
+                eprintln!("状态文件大小不一致，丢弃");
+                let _ = std::fs::remove_file(state_path);
+                return None;
+            }
+            if saved.url != final_url.as_str() {
+                eprintln!("状态文件 URL 已变更，丢弃");
+                let _ = std::fs::remove_file(state_path);
+                return None;
+            }
+            for w in &saved.workers {
+                if w.start > w.end || w.current < w.start || w.current > w.end {
+                    eprintln!("状态文件 worker 范围非法，丢弃");
+                    let _ = std::fs::remove_file(state_path);
+                    return None;
+                }
+            }
+            let covered: u64 = saved.workers.iter().map(|w| w.end - w.start).sum();
+            if covered != file_size {
+                eprintln!("状态文件 worker 覆盖范围不完整，丢弃");
+                let _ = std::fs::remove_file(state_path);
+                return None;
+            }
+            eprintln!("从状态文件恢复下载进度");
+            Some(saved.workers)
+        }
+        Err(e) => {
+            eprintln!("加载状态文件失败({})，重新开始", e);
+            let _ = std::fs::remove_file(state_path);
+            None
+        }
+    }
+}
 
-// 下载文件（通用）
 pub async fn download_file_with_progress(
     app: AppHandle,
     url: String,
     save_path: String,
     thread_count: u16,
 ) -> Result<String> {
-    let config = DownloadConfig {
+    download(DownloadConfig {
         url,
         save_path: PathBuf::from(save_path),
         thread_count,
         event_type: DownloadEventType::FileDownload,
         app_handle: Some(app),
-    };
-
-    download(config).await
+    })
+    .await
 }
 
-// 下载更新包
 pub async fn download_update_package(
     url: String,
     save_dir: PathBuf,
     thread_count: u16,
 ) -> Result<String> {
-    // 重置下载状态
-    {
-        let mut status = UPDATE_DOWNLOAD_STATUS.lock().unwrap();
-        *status = Some(DownloadStatus {
-            progress: 0,
-            speed: "0.00".to_string(),
-        });
-    }
+    set_update_status(Some(DownloadStatus {
+        progress: 0,
+        speed: "0.00".to_string(),
+    }));
 
-    let config = DownloadConfig {
+    let result = download(DownloadConfig {
         url,
         save_path: save_dir,
         thread_count,
         event_type: DownloadEventType::UpdateDownload,
         app_handle: None,
-    };
+    })
+    .await;
 
-    download(config).await
+    if result.is_err() {
+        set_update_status(None);
+    }
+    result
 }
 
-// 下载插件
 pub async fn download_plugin_file(
     url: String,
     save_path: PathBuf,
     thread_count: u16,
 ) -> Result<String> {
-    let config = DownloadConfig {
+    download(DownloadConfig {
         url,
         save_path,
         thread_count,
         event_type: DownloadEventType::PluginDownload,
         app_handle: None,
-    };
-
-    download(config).await
-}
-
-// 获取更新下载状态
-pub fn get_update_download_status() -> Option<DownloadStatus> {
-    UPDATE_DOWNLOAD_STATUS.lock().unwrap().clone()
+    })
+    .await
 }
