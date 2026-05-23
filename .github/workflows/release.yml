@@ -311,3 +311,73 @@ jobs:
           target_commitish: ${{ steps.commit.outputs.new_sha }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Notify update API (do.cloud-pe.cn)
+        shell: pwsh
+        env:
+          API_SECRET: ${{ secrets.API_UPDATE_SECRET }}
+          NEW_TAG: ${{ steps.version.outputs.new_tag }}
+          RELEASE_LOG: ${{ steps.notes.outputs.body }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          if ([string]::IsNullOrEmpty($env:API_SECRET)) {
+            Write-Warning "API_UPDATE_SECRET secret not configured -- skipping update API call"
+            exit 0
+          }
+
+          # 1. MD5 of the zip (uppercase hex, matches PHP side)
+          $md5 = (Get-FileHash -Path Cloud-PE.One.zip -Algorithm MD5).Hash.ToUpper()
+          $version  = $env:NEW_TAG
+          $log      = $env:RELEASE_LOG
+          $can_skip = 'true'
+          $timestamp = [int64]([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())
+          $rand = [guid]::NewGuid().ToString('N').Substring(0,16)
+
+          Write-Host "Notify do.cloud-pe.cn:"
+          Write-Host "  version=$version  md5=$md5"
+          Write-Host "  timestamp=$timestamp  rand=$rand  log_len=$($log.Length)"
+
+          # 2. HMAC-SHA256(SECRET, timestamp + rand + version + md5 + log + can_skip)
+          $payload = "$timestamp$rand$version$md5$log$can_skip"
+          $hmac = [System.Security.Cryptography.HMACSHA256]::new([System.Text.Encoding]::UTF8.GetBytes($env:API_SECRET))
+          try {
+            $hash = $hmac.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($payload))
+          } finally {
+            $hmac.Dispose()
+          }
+          $sign = -join ($hash | ForEach-Object { $_.ToString('x2') })
+
+          # 3. POST JSON
+          $bodyObj = [ordered]@{
+            timestamp = $timestamp
+            rand      = $rand
+            sign      = $sign
+            version   = $version
+            md5       = $md5
+            log       = $log
+            can_skip  = $can_skip
+          }
+          $bodyJson  = $bodyObj | ConvertTo-Json -Compress
+          $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($bodyJson)
+
+          try {
+            $resp = Invoke-RestMethod -Uri 'https://do.cloud-pe.cn' -Method Post `
+              -Body $bodyBytes -ContentType 'application/json; charset=utf-8'
+          } catch {
+            $errMsg = $_.Exception.Message
+            try {
+              $stream = $_.Exception.Response.GetResponseStream()
+              if ($stream) {
+                $reader = New-Object System.IO.StreamReader($stream)
+                $errMsg += " | body: " + $reader.ReadToEnd()
+              }
+            } catch {}
+            throw "POST do.cloud-pe.cn failed: $errMsg"
+          }
+
+          Write-Host "API response: $($resp | ConvertTo-Json -Depth 5 -Compress)"
+          if ($resp.code -ne 200) {
+            throw "API rejected: code=$($resp.code) message=$($resp.message)"
+          }
+          Write-Host "OK -- update API now serves $version"
