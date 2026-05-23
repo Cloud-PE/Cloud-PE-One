@@ -83,17 +83,47 @@ jobs:
               $minor = [int]$parts[1]
               Write-Summary "- using override -> major=$major minor=$minor"
             } else {
-              $tag = $null
+              # Pick the most recent release / tag whose name parses as MAJOR.MINOR[.PATCH].
+              # `/releases/latest` may have a tag_name like "Release" instead of "v1.6"
+              # (display name and tag name can diverge), so we also consider the release
+              # name field and walk through the full release list and tag list.
+              $major = $null
+              $minor = $null
+              $sources = @()
+
               try {
-                $latest = Invoke-RestMethod -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/latest" -Headers $headers
-                $tag = $latest.tag_name
-                Write-Summary "- latest release tag: $tag"
+                $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases?per_page=100" -Headers $headers
+                foreach ($r in $releases) {
+                  if ($r.tag_name)    { $sources += $r.tag_name }
+                  if ($r.name)        { $sources += $r.name }
+                }
               } catch {
-                Write-Summary "- /releases/latest failed: $_"
+                Write-Summary "- /releases listing failed: $_"
               }
 
-              if (-not $tag) {
-                Write-Summary "- falling back to Cargo.toml"
+              try {
+                $tags = Invoke-RestMethod -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/tags?per_page=100" -Headers $headers
+                foreach ($t in $tags) { if ($t.name) { $sources += $t.name } }
+              } catch {
+                Write-Summary "- /tags listing failed: $_"
+              }
+
+              Write-Summary "- candidate version strings: $($sources -join ', ')"
+
+              foreach ($s in $sources) {
+                $clean = $s.TrimStart('v','V')
+                if ($clean -match '^(\d+)\.(\d+)') {
+                  $candMajor = [int]$matches[1]
+                  $candMinor = [int]$matches[2]
+                  if ($null -eq $major -or $candMajor -gt $major -or ($candMajor -eq $major -and $candMinor -gt $minor)) {
+                    $major = $candMajor
+                    $minor = $candMinor
+                  }
+                }
+              }
+
+              if ($null -eq $major) {
+                Write-Summary "- no version-shaped tag/release found, falling back to Cargo.toml"
                 $cargo = Get-Content src-tauri/Cargo.toml -Raw
                 if ($cargo -match '(?m)^version\s*=\s*"(\d+)\.(\d+)\.(\d+)"') {
                   $major = [int]$matches[1]
@@ -102,12 +132,7 @@ jobs:
                   throw "Could not parse version from Cargo.toml"
                 }
               } else {
-                $clean = $tag.TrimStart('v','V')
-                if ($clean -notmatch '^(\d+)\.(\d+)') {
-                  throw "Latest tag '$tag' is not in the expected MAJOR.MINOR form"
-                }
-                $major = [int]$matches[1]
-                $minor = [int]$matches[2]
+                Write-Summary "- highest existing version: $major.$minor"
               }
               $minor = $minor + 1
               Write-Summary "- auto-incremented -> major=$major minor=$minor"
@@ -120,7 +145,9 @@ jobs:
             Write-Summary "**Next version: $newVersion (tag $newTag)**"
           } catch {
             Write-Summary ("**FAILED**: " + $_.Exception.Message)
-            Write-Summary ("Stack: `n```" + $_.ScriptStackTrace + "```")
+            $stack = $_.ScriptStackTrace
+            Write-Summary "Stack:"
+            Write-Summary $stack
             throw
           }
 
