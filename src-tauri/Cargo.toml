@@ -1,6 +1,6 @@
 [package]
 name = "cloud-pe-one"
-version = "1.6.0"
+version = "1.7.0"
 description = "Cloud-PE One Client"
 authors = ["Cloud-PE Dev"]
 license = ""

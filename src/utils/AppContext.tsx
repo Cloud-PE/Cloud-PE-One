@@ -7,7 +7,7 @@ import { isUpdateSkippable, getUpdateLog, getUpdateLink, getAppExecutableName, c
 import type { PluginCategory } from '../api/pluginsApi';
 
 // 当前应用版本
-const CURRENT_VERSION = 'v1.6';
+const CURRENT_VERSION = 'v1.7';
 
 interface UpdateInfo {
   version: string;
