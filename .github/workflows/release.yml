@@ -292,7 +292,9 @@ jobs:
         env:
           INPUT_NOTES: ${{ github.event.inputs.release_notes }}
         run: |
-          $body = ($env:INPUT_NOTES ?? '') -replace '\\n', "`n"
+          $raw = $env:INPUT_NOTES
+          if ($null -eq $raw) { $raw = '' }
+          $body = $raw -replace '\\n', "`n"
           $delim = "EOF_$([guid]::NewGuid().ToString('N'))"
           "body<<$delim" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           $body          | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
