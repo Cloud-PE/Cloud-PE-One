@@ -34,6 +34,7 @@ fn main() {
             read_boot_drive_version,
             get_drive_info,
             download_file_to_path,
+            cancel_download,
             open_link_os,
             usb_api::get_usb_devices,
             usb_api::get_system_boot_mode,
@@ -421,6 +422,11 @@ async fn download_file_to_path(
         Ok(file_path) => Ok(file_path),
         Err(e) => Err(format!("下载失败: {}", e)),
     }
+}
+
+#[tauri::command]
+fn cancel_download() {
+    download::request_cancel();
 }
 
 use std::{env};
