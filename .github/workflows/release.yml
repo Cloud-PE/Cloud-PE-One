@@ -315,6 +315,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Notify update API (do.cloud-pe.cn)
+        id: notify
         shell: pwsh
         env:
           API_SECRET: ${{ secrets.API_UPDATE_SECRET }}
@@ -323,8 +324,12 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
 
+          $diagFile = '.github/last-notify-diag.md'
+          if (Test-Path $diagFile) { Remove-Item $diagFile -Force }
+          function Diag([string]$m) { Write-Host $m; $m | Out-File -FilePath $diagFile -Append -Encoding utf8 }
+
           if ([string]::IsNullOrEmpty($env:API_SECRET)) {
-            Write-Warning "API_UPDATE_SECRET secret not configured -- skipping update API call"
+            Diag '## skip: API_UPDATE_SECRET secret not configured'
             exit 0
           }
 
@@ -336,19 +341,31 @@ jobs:
           $timestamp = [int64]([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())
           $rand = [guid]::NewGuid().ToString('N').Substring(0,16)
 
-          Write-Host "Notify do.cloud-pe.cn:"
-          Write-Host "  version=$version  md5=$md5"
-          Write-Host "  timestamp=$timestamp  rand=$rand  log_len=$($log.Length)"
+          $logBytes = [System.Text.Encoding]::UTF8.GetBytes($log)
+          $logHex   = ($logBytes | ForEach-Object { $_.ToString('x2') }) -join ''
+          Diag "## Notify do.cloud-pe.cn"
+          Diag "- version: $version"
+          Diag "- md5: $md5"
+          Diag "- timestamp: $timestamp"
+          Diag "- rand: $rand"
+          Diag "- log length (chars): $($log.Length)  bytes: $($logBytes.Length)"
+          Diag "- log raw (hex bytes): $logHex"
+          Diag "- log raw (string): $log"
+          Diag "- can_skip: $can_skip"
+          Diag "- secret length (chars): $($env:API_SECRET.Length)"
 
           # 2. HMAC-SHA256(SECRET, timestamp + rand + version + md5 + log + can_skip)
           $payload = "$timestamp$rand$version$md5$log$can_skip"
+          $payloadBytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
+          Diag "- payload bytes: $($payloadBytes.Length)"
           $hmac = [System.Security.Cryptography.HMACSHA256]::new([System.Text.Encoding]::UTF8.GetBytes($env:API_SECRET))
           try {
-            $hash = $hmac.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($payload))
+            $hash = $hmac.ComputeHash($payloadBytes)
           } finally {
             $hmac.Dispose()
           }
           $sign = -join ($hash | ForEach-Object { $_.ToString('x2') })
+          Diag "- sign: $sign"
 
           # 3. POST JSON
           $bodyObj = [ordered]@{
@@ -362,32 +379,65 @@ jobs:
           }
           $bodyJson  = $bodyObj | ConvertTo-Json -Compress
           $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($bodyJson)
+          Diag ''
+          Diag '## Request JSON'
+          Diag '```json'
+          Diag $bodyJson
+          Diag '```'
 
+          $failed = $false
           try {
             $resp = Invoke-WebRequest -Uri 'https://do.cloud-pe.cn' -Method Post `
               -Body $bodyBytes -ContentType 'application/json; charset=utf-8' `
               -UserAgent 'Cloud-PE-One-Release/1.0 (+https://github.com/Cloud-PE/Cloud-PE-One)' `
               -SkipHttpErrorCheck
           } catch {
+            Diag ''
+            Diag "## Transport ERROR"
+            Diag "$($_.Exception.Message)"
+            "failed=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
             throw "POST do.cloud-pe.cn failed (transport): $($_.Exception.Message)"
           }
 
-          Write-Host "HTTP $($resp.StatusCode) $($resp.StatusDescription)"
-          Write-Host "Response headers:"
-          $resp.Headers.GetEnumerator() | ForEach-Object { Write-Host "  $($_.Key): $($_.Value -join ', ')" }
-          $respBody = $resp.Content
-          Write-Host "Response body ($($respBody.Length) chars):"
-          Write-Host $respBody
+          Diag ''
+          Diag "## Response: HTTP $($resp.StatusCode) $($resp.StatusDescription)"
+          Diag '### Headers'
+          $resp.Headers.GetEnumerator() | ForEach-Object { Diag "- $($_.Key): $($_.Value -join ', ')" }
+          Diag ''
+          Diag "### Body ($($resp.Content.Length) chars)"
+          Diag '```'
+          Diag $resp.Content
+          Diag '```'
 
           if ($resp.StatusCode -ne 200) {
+            "failed=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
             throw "API HTTP $($resp.StatusCode) -- see body above"
           }
 
           $parsed = $null
-          try { $parsed = $respBody | ConvertFrom-Json -ErrorAction Stop } catch {
+          try { $parsed = $resp.Content | ConvertFrom-Json -ErrorAction Stop } catch {
+            "failed=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
             throw "API returned 200 but body is not JSON"
           }
           if ($parsed.code -ne 200) {
+            "failed=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
             throw "API rejected: code=$($parsed.code) message=$($parsed.message)"
           }
-          Write-Host "OK -- update API now serves $version"
+          Diag "## OK -- update API now serves $version"
+
+      - name: Commit notify diagnostic on failure
+        if: always() && steps.notify.outputs.failed == 'true'
+        shell: bash
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/last-notify-diag.md || true
+          if git diff --cached --quiet; then
+            echo "no diag file to commit"
+          else
+            git commit -m "ci: notify diagnostic snapshot (notify failed)"
+            for i in 1 2 3 4; do
+              if git push origin "HEAD:${GITHUB_REF_NAME}"; then break; fi
+              sleep $((2 ** i))
+            done
+          fi
