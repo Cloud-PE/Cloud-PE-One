@@ -18,12 +18,17 @@ on:
         default: true
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          token: ${{ secrets.GITHUB_TOKEN }}
+
       - name: POST do.cloud-pe.cn (diagnostic)
         shell: pwsh
         env:
@@ -34,10 +39,14 @@ jobs:
         run: |
           $ErrorActionPreference = 'Continue'
 
+          $outFile = '.github/test-notify-result.md'
+          if (Test-Path $outFile) { Remove-Item $outFile -Force }
+
           function Log {
             param([string]$msg)
             Write-Host $msg
             $msg | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            $msg | Out-File -FilePath $outFile -Append -Encoding utf8
           }
 
           if ([string]::IsNullOrEmpty($env:API_SECRET)) {
@@ -136,3 +145,20 @@ jobs:
               Log '**结论**: 真实请求被拒，看响应头判断哪一层拦的。'
             }
           }
+
+      - name: Commit diagnostic result back to repo
+        if: always()
+        shell: bash
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/test-notify-result.md
+          if git diff --cached --quiet; then
+            echo "no change in result file"
+          else
+            git commit -m "ci: test-notify diagnostic result $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            for i in 1 2 3 4; do
+              if git push origin "HEAD:${GITHUB_REF_NAME}"; then break; fi
+              sleep $((2 ** i))
+            done
+          fi
