@@ -364,22 +364,30 @@ jobs:
           $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($bodyJson)
 
           try {
-            $resp = Invoke-RestMethod -Uri 'https://do.cloud-pe.cn' -Method Post `
-              -Body $bodyBytes -ContentType 'application/json; charset=utf-8'
+            $resp = Invoke-WebRequest -Uri 'https://do.cloud-pe.cn' -Method Post `
+              -Body $bodyBytes -ContentType 'application/json; charset=utf-8' `
+              -UserAgent 'Cloud-PE-One-Release/1.0 (+https://github.com/Cloud-PE/Cloud-PE-One)' `
+              -SkipHttpErrorCheck
           } catch {
-            $errMsg = $_.Exception.Message
-            try {
-              $stream = $_.Exception.Response.GetResponseStream()
-              if ($stream) {
-                $reader = New-Object System.IO.StreamReader($stream)
-                $errMsg += " | body: " + $reader.ReadToEnd()
-              }
-            } catch {}
-            throw "POST do.cloud-pe.cn failed: $errMsg"
+            throw "POST do.cloud-pe.cn failed (transport): $($_.Exception.Message)"
           }
 
-          Write-Host "API response: $($resp | ConvertTo-Json -Depth 5 -Compress)"
-          if ($resp.code -ne 200) {
-            throw "API rejected: code=$($resp.code) message=$($resp.message)"
+          Write-Host "HTTP $($resp.StatusCode) $($resp.StatusDescription)"
+          Write-Host "Response headers:"
+          $resp.Headers.GetEnumerator() | ForEach-Object { Write-Host "  $($_.Key): $($_.Value -join ', ')" }
+          $respBody = $resp.Content
+          Write-Host "Response body ($($respBody.Length) chars):"
+          Write-Host $respBody
+
+          if ($resp.StatusCode -ne 200) {
+            throw "API HTTP $($resp.StatusCode) -- see body above"
+          }
+
+          $parsed = $null
+          try { $parsed = $respBody | ConvertFrom-Json -ErrorAction Stop } catch {
+            throw "API returned 200 but body is not JSON"
+          }
+          if ($parsed.code -ne 200) {
+            throw "API rejected: code=$($parsed.code) message=$($parsed.message)"
           }
           Write-Host "OK -- update API now serves $version"
