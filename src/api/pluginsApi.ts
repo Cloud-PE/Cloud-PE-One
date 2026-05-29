@@ -1,5 +1,5 @@
-import axios from 'axios';
 import { invoke } from '@tauri-apps/api/core';
+import { unifiedApiService } from './unifiedApi';
 
 // 插件信息接口
 export interface Plugin {
@@ -17,13 +17,6 @@ export interface Plugin {
 export interface PluginCategory {
   class: string;
   list: Plugin[];
-}
-
-// 插件API响应接口
-export interface PluginsResponse {
-  code: number;
-  message: string;
-  data: PluginCategory[];
 }
 
 // 生成插件唯一ID
@@ -49,13 +42,25 @@ export const compareVersions = (version1: string, version2: string): number => {
   return 0;
 };
 
-// 获取插件列表（移除缓存）
+// 获取插件列表（数据来自统一聚合接口的缓存，不额外发起请求）
 export const getPlugins = async (): Promise<PluginCategory[]> => {
-  const url = 'https://api.cloud-pe.cn/GetPlugins/';
-  
   try {
-    const response = await axios.get<PluginsResponse>(url);
-    return response.data.data;
+    const plugins = await unifiedApiService.getPluginsRaw();
+    // 将 v2 字段名（category / description）映射回应用内部使用的字段名
+    // （class / describe，与本地插件文件处理保持一致）
+    return plugins.data.map((category) => ({
+      class: category.category,
+      list: category.list.map((plugin) => ({
+        name: plugin.name,
+        size: plugin.size,
+        version: plugin.version,
+        author: plugin.author,
+        describe: plugin.description,
+        file: plugin.file,
+        link: plugin.link,
+        id: plugin.id,
+      })),
+    }));
   } catch (error) {
     console.error('获取插件列表失败:', error);
     throw new Error('获取插件列表失败');

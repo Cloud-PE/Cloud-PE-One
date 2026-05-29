@@ -192,7 +192,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
       // 处理应用更新
       const cachedUpdateInfo = cacheService.getUpdateInfo();
       if (cachedUpdateInfo) {
-        const latestVersion = cachedUpdateInfo.hub_new.hub_ver;
+        const latestVersion = cachedUpdateInfo.cloud_pe_one.version;
         const needsUpdate = checkNeedsUpdate(CURRENT_VERSION, latestVersion);
         
         if (needsUpdate) {

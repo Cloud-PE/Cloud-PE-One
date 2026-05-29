@@ -987,9 +987,9 @@ pub async fn deploy_to_usb(drive_letter: String) -> Result<ApiResponse, String> 
 }
 
 async fn get_pe_version() -> Result<String, reqwest::Error> {
-    let response = reqwest::get("https://api.cloud-pe.cn/GetInfo/").await?;
+    let response = reqwest::get("https://api.cloud-pe.cn/v2/cloud-pe-one.json").await?;
     let version: Value = response.json().await?;
-    let version_str = version["data"]["cloud_pe"]
+    let version_str = version["data"]["info"]["data"]["cloud_pe_version"]
         .as_str()
         .unwrap_or("1.0")
         .to_string();
@@ -1040,7 +1040,7 @@ pub async fn close_app() -> Result<ApiResponse, String> {
 async fn get_and_download_default_plugin(ce_apps_path: &str) -> Result<String, String> {
     let client = reqwest::Client::new();
     let response = match client
-        .get("https://api.cloud-pe.cn/GetInfo/?m=1")
+        .get("https://api.cloud-pe.cn/v2/cloud-pe-one.json")
         .timeout(std::time::Duration::from_secs(10))
         .send()
         .await
@@ -1054,9 +1054,9 @@ async fn get_and_download_default_plugin(ce_apps_path: &str) -> Result<String, S
         Err(e) => return Err(format!("解析JSON失败: {}", e)),
     };
 
-    let default_plugin_url = match json_data["default_plugin"].as_str() {
+    let default_plugin_url = match json_data["data"]["download"]["default_plugin_link"].as_str() {
         Some(url) => url,
-        None => return Err("未找到default_plugin字段".to_string()),
+        None => return Err("未找到default_plugin_link字段".to_string()),
     };
 
     println!("默认插件下载链接: {}", default_plugin_url);

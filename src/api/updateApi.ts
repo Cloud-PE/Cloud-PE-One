@@ -6,7 +6,7 @@ export type UpdateInfo = UnifiedApiResponse;
 // 获取更新信息的API
 export const getUpdateInfo = async (): Promise<UpdateInfo> => {
   try {
-    return await unifiedApiService.getData();
+    return await unifiedApiService.getInfo();
   } catch (error) {
     console.error('获取更新信息失败:', error);
     throw new Error('获取更新信息失败');
@@ -40,24 +40,24 @@ export const checkNeedsUpdate = (currentVersion: string, latestVersion: string):
 
 // 检查更新是否可跳过
 export const isUpdateSkippable = (updateInfo: UpdateInfo): boolean => {
-  const latestVersion = updateInfo.hub_new.hub_ver;
-  const canSkip = updateInfo.hub_new.log[latestVersion]?.can_skip;
-  
-  return canSkip === 'true';
+  const latestVersion = updateInfo.cloud_pe_one.version;
+  const canSkip = updateInfo.cloud_pe_one.logs[latestVersion]?.can_skip;
+
+  return canSkip === true;
 };
 
 // 获取更新日志
 export const getUpdateLog = (updateInfo: UpdateInfo): string => {
-  const latestVersion = updateInfo.hub_new.hub_ver;
-  return updateInfo.hub_new.log[latestVersion]?.log || '';
+  const latestVersion = updateInfo.cloud_pe_one.version;
+  return updateInfo.cloud_pe_one.logs[latestVersion]?.log || '';
 };
 
 // 获取更新下载链接
 export const getUpdateLink = (updateInfo: UpdateInfo): string => {
-  return updateInfo.hub_new.hub_updata_link;
+  return updateInfo.cloud_pe_one.update_link;
 };
 
 // 获取应用程序可执行文件名
 export const getAppExecutableName = (updateInfo: UpdateInfo): string => {
-  return updateInfo.hub_new.app_name_exe;
+  return updateInfo.cloud_pe_one.app_exe;
 };

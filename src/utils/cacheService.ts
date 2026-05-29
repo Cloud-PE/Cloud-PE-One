@@ -171,36 +171,36 @@ class CacheService {
   // 加载统一API数据
   private async loadUnifiedApiData(): Promise<void> {
     try {
-      // 并行请求两个不同的配置
+      // 并行请求主信息与下载链接
       const [defaultData, isoData] = await Promise.all([
-        unifiedApiService.getData(false),
-        unifiedApiService.getData(true)
+        unifiedApiService.getInfo(),
+        unifiedApiService.getDownload()
       ]);
-      
+
       // 保存更新信息
       this.cache.updateInfo = defaultData;
-      
+
       // 保存启动盘更新信息
       this.cache.bootDriveUpdateInfo = {
-        cloudPeVersion: defaultData.data.cloud_pe,
-        cloudPeUpdateList: defaultData.data.cloudpe_updata || []
+        cloudPeVersion: defaultData.data.cloud_pe_version,
+        cloudPeUpdateList: defaultData.data.force_update_versions || []
       };
-      
+
       // 保存通知信息
-      const content = defaultData.hub_new.hub_tip;
-      let type = defaultData.hub_new.hub_tip_type as 'info' | 'warning' | 'danger' | 'success';
+      const content = defaultData.cloud_pe_one.tip;
+      let type = defaultData.cloud_pe_one.tip_type as 'info' | 'warning' | 'danger' | 'success';
       if (!['info', 'warning', 'danger', 'success'].includes(type)) {
         type = 'info';
       }
-      
+
       if (content) {
         this.cache.notification = { content, type };
       } else {
         this.cache.notification = null;
       }
-      
+
       // 保存ISO下载链接
-      this.cache.isoDownloadLink = isoData.down_link || null;
+      this.cache.isoDownloadLink = isoData.download_link || null;
       
       console.log('统一API数据加载完成');
     } catch (error) {
