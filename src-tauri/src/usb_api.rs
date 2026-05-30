@@ -886,7 +886,10 @@ pub async fn get_system_boot_mode() -> Result<String, String> {
 }
 
 #[command]
-pub async fn deploy_to_usb(drive_letter: String) -> Result<ApiResponse, String> {
+pub async fn deploy_to_usb(
+    drive_letter: String,
+    cached_plugin_path: Option<String>,
+) -> Result<ApiResponse, String> {
     println!("开始部署到USB驱动器: {}", drive_letter);
 
     let drive_path = if drive_letter.ends_with(":\\") {
@@ -963,13 +966,35 @@ pub async fn deploy_to_usb(drive_letter: String) -> Result<ApiResponse, String> 
         }
     }
 
-    println!("开始下载默认插件...");
-    match get_and_download_default_plugin(&ce_apps_path).await {
-        Ok(downloaded_file) => {
-            println!("默认插件下载成功: {}", downloaded_file);
+    // 优先从缓存复制默认插件；缓存不可用时回退到联网下载。
+    let cached_plugin = cached_plugin_path
+        .as_deref()
+        .map(|p| p.trim())
+        .filter(|p| !p.is_empty());
+
+    match cached_plugin {
+        Some(plugin_path) if Path::new(plugin_path).exists() => {
+            let file_name = Path::new(plugin_path)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "default_plugin.ce".to_string());
+            let dest = format!("{}\\{}", ce_apps_path, file_name);
+            println!("从缓存复制默认插件: {} -> {}", plugin_path, dest);
+            match fs::copy(plugin_path, &dest) {
+                Ok(_) => println!("默认插件复制成功: {}", dest),
+                Err(e) => println!("默认插件复制失败，但部署继续: {}", e),
+            }
         }
-        Err(e) => {
-            println!("默认插件下载失败，但部署继续: {}", e);
+        _ => {
+            println!("缓存中无默认插件，开始下载默认插件...");
+            match get_and_download_default_plugin(&ce_apps_path).await {
+                Ok(downloaded_file) => {
+                    println!("默认插件下载成功: {}", downloaded_file);
+                }
+                Err(e) => {
+                    println!("默认插件下载失败，但部署继续: {}", e);
+                }
+            }
         }
     }
 

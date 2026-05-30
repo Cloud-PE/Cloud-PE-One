@@ -4,10 +4,16 @@
 )]
 
 mod download;
+mod pe_cache;
 mod plugins;
 mod updater;
 mod usb_api;
 
+use pe_cache::{
+    compute_file_md5, copy_file_with_progress, delete_cache_file, get_default_pe_cache_dir,
+    get_default_pe_cache_dir_name, get_file_size, get_path_free_space, prepare_pe_cache_dir,
+    read_pe_cache_meta, write_pe_cache_meta,
+};
 use plugins::{disable_plugin, download_plugin, enable_plugin, get_plugin_files, update_plugin};
 use tauri::Manager;
 use updater::{download_update, get_app_download_status, install_update};
@@ -46,7 +52,17 @@ fn main() {
             check_mica_support,
             check_transparency_enabled,
             open_devtools,
-            exit_app
+            exit_app,
+            get_default_pe_cache_dir,
+            get_default_pe_cache_dir_name,
+            prepare_pe_cache_dir,
+            get_path_free_space,
+            compute_file_md5,
+            read_pe_cache_meta,
+            write_pe_cache_meta,
+            delete_cache_file,
+            get_file_size,
+            copy_file_with_progress
         ])
         .setup(|app| {
             let window = app.get_webview_window("main").unwrap();

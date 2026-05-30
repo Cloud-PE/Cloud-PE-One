@@ -4,6 +4,8 @@ import { Button } from '@/components/ui/button';
 import { AlertCircle, PartyPopper, Frown } from 'lucide-react';
 import { invoke } from '../utils/tauriApiWrapper';
 import ReactMarkdown from 'react-markdown';
+import { useAppContext } from '../utils/AppContext';
+import { resolveCacheDir, getCacheDirName } from '../utils/peCache';
 
 interface UpdateNotificationProps {
   visible: boolean;
@@ -24,6 +26,7 @@ const UpdateNotification: React.FC<UpdateNotificationProps> = ({
   appExecutableName,
   canSkip
 }) => {
+  const { config } = useAppContext();
   const [downloading, setDownloading] = useState<boolean>(false);
   const [downloadProgress, setDownloadProgress] = useState<number>(0);
   const [, setDownloadSpeed] = useState<string>('0.00');
@@ -47,9 +50,18 @@ const UpdateNotification: React.FC<UpdateNotificationProps> = ({
     }, 500);
 
     try {
+      let cacheDirName: string | undefined;
+      try {
+        const dir = await resolveCacheDir(config);
+        cacheDirName = getCacheDirName(dir);
+      } catch (err) {
+        console.error('解析缓存目录名失败:', err);
+      }
+
       const script_path: string = await invoke('download_update', {
         url: downloadLink,
         appName: appExecutableName,
+        cacheDirName,
       });
       clearInterval(progressInterval);
       setDownloadProgress(100);

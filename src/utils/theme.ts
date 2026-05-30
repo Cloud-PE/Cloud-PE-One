@@ -12,6 +12,10 @@ export interface AppConfig {
   userNickname?: string;
   enablePersonalizedGreeting?: boolean;
   enableWindowEffects?: WindowEffectsMode; // 修改为新类型
+  // PE 缓存目录（为空时使用软件目录下的默认目录）
+  peCachePath?: string;
+  // 最后一次联网时获取到的最新 PE 版本号（用于离线判断缓存是否过时）
+  lastKnownLatestPeVersion?: string;
 }
 
 // 默认配置
@@ -22,6 +26,8 @@ const defaultConfig: AppConfig = {
   userNickname: '',
   enablePersonalizedGreeting: false,
   enableWindowEffects: 'partial', // 默认为"开（局部）"
+  peCachePath: '',
+  lastKnownLatestPeVersion: '',
 };
 
 // 获取配置文件路径

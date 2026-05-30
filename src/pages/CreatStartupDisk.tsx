@@ -1,12 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useAppContext } from '../utils/AppContext';
-import { getIsoDownloadLink } from '../api/isoApi';
-import {
-  downloadFileToPath,
-  cancelDownload,
-  useDownloadProgress,
-} from '../api/downloadApi';
+import { cacheService } from '../utils/cacheService';
+import { cancelDownload } from '../api/downloadApi';
 import { Button } from '@/components/ui/button';
 import { Spinner } from '@/components/ui/spinner';
 import { Progress, ProgressTrack, ProgressIndicator } from '@/components/ui/progress';
@@ -31,6 +27,14 @@ import {
 } from '@/components/ui/alert-dialog';
 import { RefreshCw, Globe, Play } from 'lucide-react';
 import CheckCircle from '@/components/icon/CheckCircle';
+import CacheSteps from '@/components/CacheSteps';
+import { usePeCachePipeline } from '../hooks/usePeCachePipeline';
+import {
+  getOnlineCacheSource,
+  resolveCacheDir,
+  checkOldVersionPrompt,
+  type OnlineCacheSource,
+} from '../utils/peCache';
 
 interface UsbDevice {
   phydrive: number;
@@ -41,11 +45,6 @@ interface UsbDevice {
 interface CreateUsbPageProps {
   onNavigate: (page: string) => void;
 }
-
-const parsePercent = (progress: string): number => {
-  const match = progress.match(/(\d+(?:\.\d+)?)/);
-  return match ? parseFloat(match[1]) : 0;
-};
 
 const extractDriveLetter = (name: string): string | null => {
   const match = name.match(/([A-Z]:)/);
@@ -58,32 +57,31 @@ const CreateUsbPage: React.FC<CreateUsbPageProps> = ({ onNavigate }) => {
   const [devices, setDevices] = useState<UsbDevice[]>([]);
   const [selectedDevice, setSelectedDevice] = useState<number | undefined>(undefined);
   const [bootMode, setBootMode] = useState<string>('UEFI');
-  const [downloading, setDownloading] = useState(false);
-  const [isDeploying, setIsDeploying] = useState(false);
   const [isInstallingVentoy, setIsInstallingVentoy] = useState(false);
   const [isInDeploymentProcess, setIsInDeploymentProcess] = useState(false);
+  const [running, setRunning] = useState(false);
   const [isCompleted, setIsCompleted] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [selectKey, setSelectKey] = useState(0);
   const [showFirstWarning, setShowFirstWarning] = useState(false);
   const [showSecondWarning, setShowSecondWarning] = useState(false);
+  const [showOldVersion, setShowOldVersion] = useState(false);
+  const [oldVersionInfo, setOldVersionInfo] = useState<{ cached?: string; latest?: string }>({});
 
-  const downloadInfo = useDownloadProgress();
-  const downloadingRef = useRef(false);
+  const pipeline = usePeCachePipeline();
+  const runningRef = useRef(false);
 
   useEffect(() => {
-    downloadingRef.current = downloading;
-  }, [downloading]);
+    runningRef.current = running;
+  }, [running]);
 
   useEffect(() => {
     return () => {
-      if (downloadingRef.current) {
+      if (runningRef.current) {
         void cancelDownload();
       }
     };
   }, []);
-
-  const percent = downloading ? parsePercent(downloadInfo.progress) : 0;
 
   const safeInvoke = async <T = any>(command: string, args?: any): Promise<T> => {
     try {
@@ -148,15 +146,14 @@ const CreateUsbPage: React.FC<CreateUsbPageProps> = ({ onNavigate }) => {
   const shouldShowBootMode = !selectedDeviceInfo?.skipSelect;
 
   const resetFlow = () => {
-    setDownloading(false);
-    setIsDeploying(false);
+    setRunning(false);
     setIsInDeploymentProcess(false);
     setIsCreatingBootDrive(false);
     setIsInstallingVentoy(false);
   };
 
   const handleStartCreate = async () => {
-    if (downloadingRef.current) {
+    if (runningRef.current) {
       await cancelDownload();
     }
     resetFlow();
@@ -178,7 +175,7 @@ const CreateUsbPage: React.FC<CreateUsbPageProps> = ({ onNavigate }) => {
     const info = devices.find((d) => d.phydrive === selectedDevice);
     if (!info) return;
     if (info.skipSelect) {
-      void startDeployment();
+      void beginDeployment();
     } else {
       setShowFirstWarning(true);
     }
@@ -191,7 +188,7 @@ const CreateUsbPage: React.FC<CreateUsbPageProps> = ({ onNavigate }) => {
 
   const handleSecondWarningConfirm = () => {
     setShowSecondWarning(false);
-    void startDeployment();
+    void beginDeployment();
   };
 
   const installVentoyIfNeeded = async (skipSelect: boolean): Promise<boolean> => {
@@ -237,11 +234,43 @@ const CreateUsbPage: React.FC<CreateUsbPageProps> = ({ onNavigate }) => {
     return found;
   };
 
+  // 部署前的离线旧版本检查
+  const beginDeployment = async () => {
+    const online = cacheService.getNetworkConnected();
+    if (!online) {
+      try {
+        const dir = await resolveCacheDir(config);
+        const check = await checkOldVersionPrompt(config, dir);
+        if (!check.hasCache) {
+          toastManager.add({
+            title: '无法制作',
+            description: '当前处于离线状态，且没有可用的本地 PE 缓存',
+            type: 'error',
+          });
+          return;
+        }
+        if (check.need) {
+          setOldVersionInfo({ cached: check.cachedVersion, latest: check.latestVersion });
+          setShowOldVersion(true);
+          return;
+        }
+      } catch (err) {
+        console.error('检查缓存状态失败:', err);
+      }
+    }
+    await startDeployment();
+  };
+
+  const handleAcceptOldVersion = async () => {
+    setShowOldVersion(false);
+    await startDeployment();
+  };
+
   const startDeployment = async () => {
-    if (downloading) {
+    if (runningRef.current) {
       toastManager.add({
         title: '提示',
-        description: '已有下载任务在进行中',
+        description: '已有任务在进行中',
         type: 'warning',
       });
       return;
@@ -256,18 +285,19 @@ const CreateUsbPage: React.FC<CreateUsbPageProps> = ({ onNavigate }) => {
 
     if (!(await installVentoyIfNeeded(skipSelect))) return;
 
-    let downloadLink: string;
-    try {
-      downloadLink = await getIsoDownloadLink();
-    } catch (err) {
-      console.error('获取下载链接失败:', err);
-      resetFlow();
-      toastManager.add({
-        title: '获取下载链接失败',
-        description: '无法获取ISO镜像下载链接，请检查网络连接',
-        type: 'error',
-      });
-      return;
+    const online = cacheService.getNetworkConnected();
+    let source: OnlineCacheSource | undefined;
+    let effectiveOnline = online;
+    if (online) {
+      try {
+        source = await getOnlineCacheSource();
+        if (!source.isoUrl) {
+          effectiveOnline = false;
+        }
+      } catch (err) {
+        console.error('获取在线缓存信息失败，尝试使用本地缓存:', err);
+        effectiveOnline = false;
+      }
     }
 
     const target = await resolveDownloadPath(skipSelect);
@@ -281,35 +311,47 @@ const CreateUsbPage: React.FC<CreateUsbPageProps> = ({ onNavigate }) => {
       return;
     }
 
-    setDownloading(true);
+    setRunning(true);
 
     toastManager.add({
       title: '开始部署 Cloud-PE',
-      description: `正在下载 Cloud-PE 镜像到: ${target.drive}`,
+      description: effectiveOnline
+        ? `正在准备 PE 缓存并部署到: ${target.drive}`
+        : `正在使用本地缓存部署到: ${target.drive}`,
       type: 'info',
     });
 
     try {
-      await downloadFileToPath(downloadLink, target.path, config.downloadThreads);
-      setDownloading(false);
-      setIsDeploying(true);
-      await performDeploy(target.drive);
+      const result = await pipeline.run({
+        config,
+        online: effectiveOnline,
+        withDeploy: true,
+        targetPath: target.path,
+        threads: config.downloadThreads,
+        source,
+      });
+      await performDeploy(target.drive, result.cachedPluginPath);
     } catch (err) {
-      console.error('下载失败:', err);
+      console.error('部署失败:', err);
+      pipeline.markError();
       resetFlow();
       toastManager.add({
-        title: '下载失败',
-        description: err instanceof Error ? err.message : String(err ?? '下载ISO镜像时发生错误'),
+        title: '部署失败',
+        description: err instanceof Error ? err.message : String(err ?? '部署过程中发生错误'),
         type: 'error',
       });
     }
   };
 
-  const performDeploy = async (drive: string) => {
+  const performDeploy = async (drive: string, cachedPluginPath?: string) => {
     try {
-      const result: any = await safeInvoke('deploy_to_usb', { driveLetter: drive });
+      const result: any = await safeInvoke('deploy_to_usb', {
+        driveLetter: drive,
+        cachedPluginPath,
+      });
 
-      setIsDeploying(false);
+      pipeline.markDone();
+      setRunning(false);
       setIsInDeploymentProcess(false);
       setIsCreatingBootDrive(false);
       setIsCompleted(true);
@@ -330,6 +372,7 @@ const CreateUsbPage: React.FC<CreateUsbPageProps> = ({ onNavigate }) => {
       }, 1000);
     } catch (err) {
       console.error('部署失败:', err);
+      pipeline.markError();
       resetFlow();
       toastManager.add({
         title: '部署失败',
@@ -338,38 +381,6 @@ const CreateUsbPage: React.FC<CreateUsbPageProps> = ({ onNavigate }) => {
       });
     }
   };
-
-  const StepsIndicator = ({ current }: { current: number }) => (
-    <div className="flex items-center justify-center gap-4 mb-10 w-full max-w-[600px]">
-      <div className="flex items-center gap-2">
-        <div
-          className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium ${
-            current >= 0 ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'
-          }`}
-        >
-          {current > 0 ? <CheckCircle className="w-4 h-4" /> : '1'}
-        </div>
-        <div className="flex flex-col">
-          <span className="text-sm font-medium">{current > 0 ? '已完成' : '进行中'}</span>
-          <span className="text-xs text-muted-foreground">选择安装设备</span>
-        </div>
-      </div>
-      <div className={`flex-1 h-0.5 ${current > 0 ? 'bg-primary' : 'bg-muted'}`} />
-      <div className="flex items-center gap-2">
-        <div
-          className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium ${
-            current >= 1 ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'
-          }`}
-        >
-          2
-        </div>
-        <div className="flex flex-col">
-          <span className="text-sm font-medium">{current >= 1 ? '进行中' : '等待中'}</span>
-          <span className="text-xs text-muted-foreground">部署Cloud-PE</span>
-        </div>
-      </div>
-    </div>
-  );
 
   if (currentStep === 0) {
     return (
@@ -393,40 +404,39 @@ const CreateUsbPage: React.FC<CreateUsbPageProps> = ({ onNavigate }) => {
   if (isInDeploymentProcess && isInstallingVentoy) {
     return (
       <div className="w-full flex flex-col items-center justify-center overflow-hidden px-6 mt-12">
-        <StepsIndicator current={1} />
         <Spinner className="w-10 h-10 mb-6" />
         <h3 className="text-xl font-semibold mb-8 text-center">正在安装Ventoy中</h3>
       </div>
     );
   }
 
-  if (isInDeploymentProcess && (downloading || isDeploying)) {
+  if (isInDeploymentProcess && running) {
     return (
       <div className="w-full flex flex-col items-center justify-center overflow-hidden px-6 mt-12">
-        <StepsIndicator current={1} />
+        <CacheSteps steps={pipeline.steps} current={pipeline.currentIndex} />
         <Globe className="w-16 h-16 mb-6" />
-        <h2 className="text-2xl font-semibold mb-8 text-center">部署中</h2>
+        <h2 className="text-2xl font-semibold mb-8 text-center">{pipeline.statusText || '部署中'}</h2>
 
-        <div className="w-full max-w-[400px] mb-6">
-          <Progress value={percent}>
-            <div className="flex justify-between text-sm mb-2">
-              <span>进度</span>
-              <span className="text-sm tabular-nums">{percent.toFixed(1)}%</span>
+        {pipeline.showProgress && (
+          <>
+            <div className="w-full max-w-[400px] mb-6">
+              <Progress value={pipeline.percent}>
+                <div className="flex justify-between text-sm mb-2">
+                  <span>进度</span>
+                  <span className="text-sm tabular-nums">{pipeline.percent.toFixed(1)}%</span>
+                </div>
+                <ProgressTrack className="h-2">
+                  <ProgressIndicator />
+                </ProgressTrack>
+              </Progress>
             </div>
-            <ProgressTrack className="h-2">
-              <ProgressIndicator />
-            </ProgressTrack>
-          </Progress>
-        </div>
 
-        <div className="flex justify-between w-full max-w-[400px] mt-4">
-          <span className="text-sm text-muted-foreground font-medium">
-            下载速度: {downloadInfo.speed}
-          </span>
-          <span className="text-sm text-muted-foreground font-medium">
-            状态: {downloading ? '下载中' : '部署中'}
-          </span>
-        </div>
+            <div className="flex justify-between w-full max-w-[400px] mt-4">
+              <span className="text-sm text-muted-foreground font-medium">速度: {pipeline.speed}</span>
+              <span className="text-sm text-muted-foreground font-medium">状态: {pipeline.statusText}</span>
+            </div>
+          </>
+        )}
       </div>
     );
   }
@@ -434,7 +444,6 @@ const CreateUsbPage: React.FC<CreateUsbPageProps> = ({ onNavigate }) => {
   if (isInDeploymentProcess) {
     return (
       <div className="w-full flex flex-col items-center justify-center overflow-hidden px-6 mt-12">
-        <StepsIndicator current={1} />
         <Spinner className="w-10 h-10 mb-6" />
         <h3 className="text-xl font-semibold mb-8 text-center">准备部署中...</h3>
       </div>
@@ -443,8 +452,6 @@ const CreateUsbPage: React.FC<CreateUsbPageProps> = ({ onNavigate }) => {
 
   return (
     <div className="w-full flex flex-col items-center overflow-hidden px-6 mt-12">
-      <StepsIndicator current={0} />
-
       <h3 className="text-xl font-semibold mb-6 text-center">选择要制作启动盘的USB设备</h3>
 
       <div className="w-full max-w-[500px]">
@@ -546,6 +553,22 @@ const CreateUsbPage: React.FC<CreateUsbPageProps> = ({ onNavigate }) => {
             <Button variant="destructive" onClick={handleSecondWarningConfirm}>
               确定
             </Button>
+          </AlertDialogFooter>
+        </AlertDialogPopup>
+      </AlertDialog>
+
+      <AlertDialog open={showOldVersion} onOpenChange={setShowOldVersion}>
+        <AlertDialogPopup>
+          <AlertDialogHeader>
+            <AlertDialogTitle>使用较旧的缓存版本？</AlertDialogTitle>
+            <AlertDialogDescription>
+              当前处于离线状态，本地缓存为 Cloud-PE v{oldVersionInfo.cached}，而最近一次联网时检测到的最新版本为
+              v{oldVersionInfo.latest}。是否继续使用这个较旧的缓存版本制作启动盘？
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogClose render={<Button variant="outline" />}>取消</AlertDialogClose>
+            <Button onClick={handleAcceptOldVersion}>使用旧版本</Button>
           </AlertDialogFooter>
         </AlertDialogPopup>
       </AlertDialog>

@@ -5,6 +5,7 @@ import { cacheService } from './cacheService';
 import { compareVersions } from '../api/bootDriveUpdateApi';
 import { isUpdateSkippable, getUpdateLog, getUpdateLink, getAppExecutableName, checkNeedsUpdate } from '../api/updateApi';
 import type { PluginCategory } from '../api/pluginsApi';
+import { resolveCacheDir, getCacheMeta, normalizeVersion } from './peCache';
 
 // 当前应用版本
 const CURRENT_VERSION = 'v1.7';
@@ -228,6 +229,22 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
           });
           
           setBootDriveUpdateCanSkip(!isCurrentVersionInUpdateList);
+        } else if (cachedBootDriveVersion && !cacheService.getNetworkConnected()) {
+          // 离线：根据本地 PE 缓存版本判断启动盘是否可升级（缓存版本高于启动盘版本时显示升级）
+          try {
+            const cfg = await loadConfig();
+            const dir = await resolveCacheDir(cfg);
+            const meta = await getCacheMeta(dir);
+            if (
+              meta?.peVersion &&
+              checkNeedsUpdate(normalizeVersion(cachedBootDriveVersion), normalizeVersion(meta.peVersion))
+            ) {
+              setBootDriveUpdateAvailable(true);
+              setBootDriveUpdateCanSkip(true);
+            }
+          } catch (err) {
+            console.error('离线判断启动盘升级失败:', err);
+          }
         }
       }
     };

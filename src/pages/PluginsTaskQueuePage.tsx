@@ -8,7 +8,6 @@ import {
   CheckCircle2,
   XCircle,
   Ban,
-  ListChecks,
   PackageOpen,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -169,11 +168,8 @@ const PluginsTaskQueuePage: React.FC = () => {
 
   return (
     <div className="pt-6 px-6 w-full flex flex-col">
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-2">
-          <ListChecks className="h-5 w-5" />
-          <h2 className="text-xl font-bold">任务队列</h2>
-        </div>
+      <div className="flex items-center justify-between mb-6">
+        <h3 className="text-2xl font-semibold">任务队列</h3>
         {finishedTasks.length > 0 && (
           <Button size="sm" variant="outline" onClick={clearFinished}>
             <Trash2 className="h-4 w-4 mr-1" />
@@ -183,9 +179,14 @@ const PluginsTaskQueuePage: React.FC = () => {
       </div>
 
       {tasks.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-20">
-          <PackageOpen className="h-16 w-16 text-muted-foreground mb-4" />
-          <p className="text-muted-foreground">暂无下载任务</p>
+        <div className="flex justify-center">
+          <div className="flex flex-col items-center justify-center py-12">
+            <PackageOpen className="w-16 h-16 mb-2" />
+            <h2 className="mt-4 text-2xl font-semibold mb-2 text-center">暂无下载任务</h2>
+            <p className="mt-2 text-sm text-muted-foreground">
+              当前没有任何下载任务，前往插件市场即可添加下载任务。
+            </p>
+          </div>
         </div>
       ) : (
         <div className="flex flex-col gap-5">
