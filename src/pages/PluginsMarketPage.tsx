@@ -29,11 +29,10 @@ const PluginsMarketPage: React.FC = () => {
     searchResults,
     searchKeyword,
     config,
-    downloadingPlugins,
-    setPluginDownloading,
     triggerPluginListRefresh,
     isNetworkConnected,
   } = useAppContext();
+  const { enqueueDownload, isPluginActive } = useTaskQueue();
 
   const [currentCategory, setCurrentCategory] = useState<string>('');
   const [, setUserSelectedCategory] = useState<boolean>(false);
@@ -349,7 +348,7 @@ const PluginsMarketPage: React.FC = () => {
   // 渲染插件卡片
   const renderPluginCard = (plugin: Plugin, index: number) => {
     const pluginId = getPluginUniqueId(plugin);
-    const isDownloading = downloadingPlugins[pluginId];
+    const isDownloading = isPluginActive(pluginId);
     const isProcessing = processingPlugins[pluginId];
     const status = getPluginStatus(plugin);
 
