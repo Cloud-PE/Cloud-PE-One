@@ -102,7 +102,9 @@ class UnifiedApiService {
 
     this.pending = (async () => {
       try {
-        const response = await axios.get<CloudPeOneResponse>(this.url);
+        const response = await axios.get<CloudPeOneResponse>(this.url, {
+          timeout: 10000,
+        });
 
         if (response.data.code === 200) {
           this.cache = response.data;
