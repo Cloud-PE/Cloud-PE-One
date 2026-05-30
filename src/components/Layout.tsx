@@ -77,6 +77,7 @@ const AppLayout: React.FC<AppLayoutProps> = ({ children, currentPage, onNavigate
       items: [
         { itemKey: 'download-plugins', text: '下载插件' },
         { itemKey: 'manage-plugins', text: '插件管理' },
+        { itemKey: 'task-queue', text: '任务队列' },
       ]
     },
     { itemKey: 'docs', text: '文档', icon: <FileText className="h-4 w-4" /> },

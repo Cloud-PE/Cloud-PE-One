@@ -8,10 +8,12 @@ import SettingsPage from './pages/SettingsPage';
 import DocsPage from './pages/DocsPage';
 import PluginsMarketPage from './pages/PluginsMarketPage';
 import PluginsManagePage from './pages/PluginsManagePage';
+import PluginsTaskQueuePage from './pages/PluginsTaskQueuePage';
 import UpgradeBootDrivePage from './pages/UpgradeBootDrivePage';
 import CreateIsoPage from './pages/CreateIsoPage';
 import CreatStartupDisk from './pages/CreatStartupDisk';
 import UpdateNotification from './components/UpdateNotification';
+import { TaskQueueProvider } from './utils/TaskQueueContext';
 import './App.css';
 
 // 主应用组件
@@ -73,6 +75,8 @@ const AppContent: React.FC = () => {
         return <PluginsMarketPage />;
       case 'manage-plugins':
         return <PluginsManagePage />;
+      case 'task-queue':
+        return <PluginsTaskQueuePage />;
       default:
         return <HomePage onNavigate={handleNavigate} />;
     }
@@ -111,7 +115,9 @@ const App: React.FC = () => {
   return (
     <AppProvider>
       <ToastProvider>
-        <AppContent />
+        <TaskQueueProvider>
+          <AppContent />
+        </TaskQueueProvider>
       </ToastProvider>
     </AppProvider>
   );
