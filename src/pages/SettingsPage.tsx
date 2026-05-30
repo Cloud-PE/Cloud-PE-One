@@ -13,7 +13,10 @@ import { Accordion, AccordionItem, AccordionTrigger, AccordionPanel } from '@/co
 import { Select, SelectTrigger, SelectValue, SelectPopup, SelectItem } from '@/components/ui/select';
 import { AlertDialog, AlertDialogPopup, AlertDialogHeader, AlertDialogTitle, AlertDialogDescription, AlertDialogFooter, AlertDialogClose } from '@/components/ui/alert-dialog';
 import { toastManager } from '@/components/ui/toast';
-import { Github } from 'lucide-react';
+import { Github, FolderOpen, RotateCcw } from 'lucide-react';
+import { open as openDialog } from '@tauri-apps/plugin-dialog';
+import { resolveCacheDir } from '../utils/peCache';
+import { preparePeCacheDir } from '../api/peCacheApi';
 
 const SettingsPage: React.FC = () => {
   const {
@@ -30,6 +33,73 @@ const SettingsPage: React.FC = () => {
   const [selectedBootDrive, setSelectedBootDrive] = useState<string>(bootDrive?.letter || '');
   const [showBootDriveModal, setShowBootDriveModal] = useState(false);
   const [pendingBootDrive, setPendingBootDrive] = useState<string>('');
+
+  // 新增：PE 缓存目录相关状态（仅可通过按钮选择目录，不允许手动编辑）
+  const [cachePathInput, setCachePathInput] = useState<string>(config.peCachePath || '');
+  const [defaultCacheDir, setDefaultCacheDir] = useState<string>('');
+  const [cacheBusy, setCacheBusy] = useState<boolean>(false);
+
+  // 解析默认缓存目录（缓存路径为空时在输入框中展示该默认目录）
+  useEffect(() => {
+    void (async () => {
+      try {
+        const dir = await resolveCacheDir({ ...config, peCachePath: '' });
+        setDefaultCacheDir(dir);
+      } catch (error) {
+        console.error('获取默认缓存目录失败:', error);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 同步配置中的缓存路径
+  useEffect(() => {
+    setCachePathInput(config.peCachePath || '');
+  }, [config.peCachePath]);
+
+  const handleChangeCacheDir = async () => {
+    if (cacheBusy) return;
+    try {
+      const selected = await openDialog({ directory: true, multiple: false });
+      if (typeof selected !== 'string' || !selected) return;
+      setCacheBusy(true);
+      await preparePeCacheDir(selected);
+      await updateConfig({ peCachePath: selected });
+      setCachePathInput(selected);
+      toastManager.add({
+        title: '成功',
+        description: `缓存目录已更改为：${selected}`,
+        type: 'success',
+      });
+    } catch (error) {
+      console.error('更改缓存目录失败:', error);
+      toastManager.add({
+        title: '失败',
+        description: '更改缓存目录失败',
+        type: 'error',
+      });
+    } finally {
+      setCacheBusy(false);
+    }
+  };
+
+  const handleResetCacheDir = async () => {
+    if (cacheBusy) return;
+    try {
+      setCacheBusy(true);
+      await updateConfig({ peCachePath: '' });
+      setCachePathInput('');
+      toastManager.add({
+        title: '成功',
+        description: '已恢复为默认缓存目录',
+        type: 'success',
+      });
+    } catch (error) {
+      console.error('恢复默认缓存目录失败:', error);
+    } finally {
+      setCacheBusy(false);
+    }
+  };
 
   // 监听配置变化，同步用户称呼
   useEffect(() => {
@@ -195,7 +265,7 @@ const SettingsPage: React.FC = () => {
   return (
     <div className="h-[92vh] overflow-auto p-0">
       <div className="p-4 max-w-[800px] mx-auto min-h-[calc(100vh-32px)] box-border">
-        <Accordion defaultValue={['client-settings', 'about']} multiple>
+        <Accordion defaultValue={['client-settings', 'cache-settings', 'about']} multiple>
           <AccordionItem value="client-settings">
             <AccordionTrigger>客户端设置</AccordionTrigger>
             <AccordionPanel>
@@ -281,6 +351,41 @@ const SettingsPage: React.FC = () => {
                     onCheckedChange={handleWebSearchToggle}
                   />
                 </div>
+              </div>
+            </AccordionPanel>
+          </AccordionItem>
+
+          <AccordionItem value="cache-settings">
+            <AccordionTrigger>PE 缓存设置</AccordionTrigger>
+            <AccordionPanel>
+              <div className="py-2">
+                <div className="mb-4">
+                  <div className="flex items-center gap-3 mb-2">
+                    <Label>缓存目录：</Label>
+                    <Input
+                      value={cachePathInput || defaultCacheDir}
+                      readOnly
+                      disabled
+                      placeholder="默认为软件目录下的 cache 文件夹"
+                      className="w-[320px]"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex gap-3 flex-wrap">
+                  <Button onClick={handleChangeCacheDir} disabled={cacheBusy}>
+                    <FolderOpen className="size-4 mr-2" />
+                    选择目录
+                  </Button>
+                  <Button variant="outline" onClick={handleResetCacheDir} disabled={cacheBusy}>
+                    <RotateCcw className="size-4 mr-2" />
+                    恢复默认
+                  </Button>
+                </div>
+
+                <p className="mt-3 text-xs text-muted-foreground">
+                  缓存目录用于存放下载好的 PE 镜像、默认插件以及缓存信息。留空则使用默认目录。软件升级时不会删除该目录。
+                </p>
               </div>
             </AccordionPanel>
           </AccordionItem>

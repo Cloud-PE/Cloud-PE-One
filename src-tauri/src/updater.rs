@@ -84,9 +84,18 @@ fn create_update_script(
     app_dir: &str,
     tmp_dir: &str,
     app_name: &str,
+    cache_dir_name: &str,
 ) -> Result<String> {
     println!("开始创建更新脚本...");
     let script_path = Path::new(app_dir).join("tmpAppUpdata.bat");
+
+    // 始终保留默认缓存目录 cache，以及用户自定义且位于软件目录下的缓存目录，
+    // 避免在升级时误删 PE 缓存。
+    let mut dir_guard = String::from("if not \"%%i\"==\"tmpFile\" if /i not \"%%i\"==\"cache\"");
+    let trimmed = cache_dir_name.trim();
+    if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("cache") {
+        dir_guard.push_str(&format!(" if /i not \"%%i\"==\"{}\"", trimmed));
+    }
 
     let mut script_content = String::new();
 
@@ -103,7 +112,7 @@ fn create_update_script(
         script_content.push_str("echo.\r\n");
 
         script_content.push_str("echo [步骤2/5] 清理旧版本文件...\r\n");
-        script_content.push_str("for /d %%i in (*) do if not \"%%i\"==\"tmpFile\" (\r\n");
+        script_content.push_str(&format!("for /d %%i in (*) do {} (\r\n", dir_guard));
         script_content.push_str("    echo   删除目录: %%i\r\n");
         script_content.push_str("    rd /s /q \"%%i\"\r\n");
         script_content.push_str(")\r\n");
@@ -155,7 +164,11 @@ fn create_update_script(
 }
 
 #[command]
-pub async fn download_update(url: String, app_name: String) -> Result<String, String> {
+pub async fn download_update(
+    url: String,
+    app_name: String,
+    cache_dir_name: Option<String>,
+) -> Result<String, String> {
     println!("\n========================================");
     println!("开始应用程序更新流程");
     println!("========================================\n");
@@ -193,9 +206,14 @@ pub async fn download_update(url: String, app_name: String) -> Result<String, St
     }
 
     println!("\n[步骤 4/4] 创建更新脚本...");
-    let script_path =
-        create_update_script(&app_dir_str, &tmp_dir_path.to_string_lossy(), &app_name)
-            .map_err(|e| e.to_string())?;
+    let cache_dir_name = cache_dir_name.unwrap_or_default();
+    let script_path = create_update_script(
+        &app_dir_str,
+        &tmp_dir_path.to_string_lossy(),
+        &app_name,
+        &cache_dir_name,
+    )
+    .map_err(|e| e.to_string())?;
 
     println!("已完成创建更新脚本");
 

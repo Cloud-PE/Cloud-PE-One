@@ -18,8 +18,14 @@ import {
 } from '@/components/ui/select';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Label } from '@/components/ui/label';
+import { invoke } from '@tauri-apps/api/core';
 import { useAppContext } from '../utils/AppContext';
 import { cacheService } from '../utils/cacheService';
+import { loadConfig } from '../utils/theme';
+import { resolveCacheDir } from '../utils/peCache';
+import { preparePeCacheDir, getPathFreeSpace } from '../api/peCacheApi';
+
+const MIN_CACHE_FREE_BYTES = 1024 * 1024 * 1024; // 1 GB
 
 interface LoadingScreenProps {
   onLoadingComplete: () => void;
@@ -29,6 +35,7 @@ const LoadingScreen: React.FC<LoadingScreenProps> = ({ onLoadingComplete }) => {
   const { setBootDrive, setNetworkConnected, setIsLoading, setBootDriveVersion } = useAppContext();
   const [loadingText, setLoadingText] = useState<string>('正在启动: 检查环境');
   const [showErrorModal, setShowErrorModal] = useState<boolean>(false);
+  const [showLowSpaceModal, setShowLowSpaceModal] = useState<boolean>(false);
   const [isOfflineMode, setIsOfflineMode] = useState<boolean>(false);
   const [showBootDriveModal, setShowBootDriveModal] = useState<boolean>(false);
   const [selectedDriveLetter, setSelectedDriveLetter] = useState<string>('');
@@ -51,6 +58,22 @@ const LoadingScreen: React.FC<LoadingScreenProps> = ({ onLoadingComplete }) => {
       isProcessing.current = true;
 
       try {
+        // 启动时检查 PE 缓存目录所在磁盘的剩余空间（自动创建缓存目录）
+        setLoadingText('正在启动: 检查缓存目录');
+        try {
+          const cfg = await loadConfig();
+          const cacheDir = await resolveCacheDir(cfg);
+          await preparePeCacheDir(cacheDir);
+          const freeBytes = await getPathFreeSpace(cacheDir);
+          if (freeBytes < MIN_CACHE_FREE_BYTES) {
+            setShowLowSpaceModal(true);
+            isProcessing.current = false;
+            return;
+          }
+        } catch (err) {
+          console.error('检查缓存目录剩余空间失败:', err);
+        }
+
         // 如果已经是离线模式，跳过网络检查
         if (isOfflineMode) {
           await handleOfflineModeInit();
@@ -232,6 +255,24 @@ const LoadingScreen: React.FC<LoadingScreenProps> = ({ onLoadingComplete }) => {
       <Spinner className="size-8" />
       <p className="mt-4 text-sm text-foreground">{loadingText}</p>
 
+      {/* 缓存空间不足模态框（只能关闭软件） */}
+      <Dialog open={showLowSpaceModal}>
+        <DialogPopup showCloseButton={false} className="sm:max-w-[420px]">
+          <DialogHeader>
+            <DialogTitle className="flex items-center justify-center gap-2">
+              <TriangleAlertIcon className="size-6 text-destructive" />
+              <span>磁盘空间不足</span>
+            </DialogTitle>
+            <DialogDescription>
+              PE 缓存目录所在磁盘的可用空间不足 1 GB，无法保证缓存与制作功能正常运行。请清理磁盘空间，或在重新打开软件前于设置中更改缓存目录到空间充足的磁盘。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex justify-center px-6 pb-6">
+            <Button onClick={() => void invoke('exit_app')}>我知道了</Button>
+          </div>
+        </DialogPopup>
+      </Dialog>
+
       {/* 网络错误模态框 */}
       <Dialog open={showErrorModal}>
         <DialogPopup showCloseButton={false} className="sm:max-w-[400px]">
@@ -253,7 +294,7 @@ const LoadingScreen: React.FC<LoadingScreenProps> = ({ onLoadingComplete }) => {
             </Button>
             <Button
               variant="destructive"
-              onClick={() => window.close()}
+              onClick={() => void invoke('exit_app')}
             >
               关闭应用
             </Button>

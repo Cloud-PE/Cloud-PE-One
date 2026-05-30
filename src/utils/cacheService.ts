@@ -2,6 +2,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { unifiedApiService } from '../api/unifiedApi';
 import { getPlugins } from '../api/pluginsApi';
+import { loadConfig, saveConfig } from './theme';
 import type { DriveInfo } from './system';
 import type { PluginCategory } from '../api/pluginsApi';
 
@@ -160,6 +161,20 @@ class CacheService {
         cloudPeVersion: defaultData.data.cloud_pe_version,
         cloudPeUpdateList: defaultData.data.force_update_versions || []
       };
+
+      // 记录最后一次联网时获取到的最新 PE 版本号（用于离线判断缓存是否过时）
+      const latestPeVersion = (defaultData.data.cloud_pe_version || '').replace(/^v/i, '').trim();
+      if (latestPeVersion) {
+        try {
+          const cfg = await loadConfig();
+          if (cfg.lastKnownLatestPeVersion !== latestPeVersion) {
+            cfg.lastKnownLatestPeVersion = latestPeVersion;
+            await saveConfig(cfg);
+          }
+        } catch (err) {
+          console.error('保存最新 PE 版本号失败:', err);
+        }
+      }
 
       // 保存通知信息
       const content = defaultData.cloud_pe_one.tip;

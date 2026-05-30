@@ -3,24 +3,31 @@ import { Button } from '@/components/ui/button';
 import { Progress, ProgressTrack, ProgressIndicator } from '@/components/ui/progress';
 import { toastManager } from '@/components/ui/toast';
 import { Globe, Play } from 'lucide-react';
+import {
+  AlertDialog,
+  AlertDialogPopup,
+  AlertDialogHeader,
+  AlertDialogFooter,
+  AlertDialogTitle,
+  AlertDialogDescription,
+  AlertDialogClose,
+} from '@/components/ui/alert-dialog';
 import CheckCircle from '@/components/icon/CheckCircle';
 import { invoke } from '@tauri-apps/api/core';
 import { useAppContext } from '../utils/AppContext';
 import { cacheService } from '../utils/cacheService';
+import { cancelDownload } from '../api/downloadApi';
+import { usePeCachePipeline } from '../hooks/usePeCachePipeline';
+import CacheSteps from '../components/CacheSteps';
 import {
-  downloadFileToPath,
-  cancelDownload,
-  useDownloadProgress,
-} from '../api/downloadApi';
+  getOnlineCacheSource,
+  resolveCacheDir,
+  checkOldVersionPrompt,
+} from '../utils/peCache';
 
 interface UpgradeBootDrivePageProps {
   onNavigate: (page: string) => void;
 }
-
-const parsePercent = (progress: string): number => {
-  const match = progress.match(/(\d+(?:\.\d+)?)/);
-  return match ? parseFloat(match[1]) : 0;
-};
 
 const UpgradeBootDrivePage: React.FC<UpgradeBootDrivePageProps> = ({ onNavigate }) => {
   const {
@@ -32,30 +39,31 @@ const UpgradeBootDrivePage: React.FC<UpgradeBootDrivePageProps> = ({ onNavigate 
     bootDrive,
   } = useAppContext();
 
-  const [isDeploying, setIsDeploying] = useState(false);
-  const [downloading, setDownloading] = useState(false);
+  const [running, setRunning] = useState(false);
   const [isCompleted, setIsCompleted] = useState(false);
-  const downloadInfo = useDownloadProgress();
-  const downloadingRef = useRef(false);
+  const [showOldVersion, setShowOldVersion] = useState(false);
+  const [oldVersionInfo, setOldVersionInfo] = useState<{ cached?: string; latest?: string }>({});
+
+  const pipeline = usePeCachePipeline();
+  const runningRef = useRef(false);
 
   useEffect(() => {
-    downloadingRef.current = downloading;
-  }, [downloading]);
+    runningRef.current = running;
+  }, [running]);
 
   useEffect(() => {
     return () => {
-      if (downloadingRef.current) {
+      if (runningRef.current) {
         void cancelDownload();
       }
     };
   }, []);
 
-  const percent = downloading ? parsePercent(downloadInfo.progress) : 0;
-
-  const performDeploy = async () => {
+  const performDeploy = async (cachedPluginPath?: string) => {
     try {
       const result: any = await invoke('deploy_to_usb', {
         driveLetter: bootDrive?.letter,
+        cachedPluginPath,
       });
 
       const newVersion = result?.data?.pe?.version;
@@ -68,7 +76,8 @@ const UpgradeBootDrivePage: React.FC<UpgradeBootDrivePageProps> = ({ onNavigate 
         setBootDrive({ ...bootDrive, version: newVersion });
       }
 
-      setIsDeploying(false);
+      pipeline.markDone();
+      setRunning(false);
       setIsCompleted(true);
       setIsUpgradingBootDrive(false);
 
@@ -79,13 +88,66 @@ const UpgradeBootDrivePage: React.FC<UpgradeBootDrivePageProps> = ({ onNavigate 
       });
     } catch (err) {
       console.error('部署失败:', err);
-      setIsDeploying(false);
+      pipeline.markError();
+      setRunning(false);
       setIsUpgradingBootDrive(false);
 
       toastManager.add({
         type: 'error',
         title: '升级失败',
         description: `启动盘升级过程中发生错误: ${err}`,
+      });
+    }
+  };
+
+  const startUpgrade = async () => {
+    if (!bootDrive?.letter) return;
+
+    setRunning(true);
+    setIsUpgradingBootDrive(true);
+
+    const online = cacheService.getNetworkConnected();
+    let source;
+    let effectiveOnline = online;
+    if (online) {
+      try {
+        source = await getOnlineCacheSource();
+        if (!source.isoUrl) {
+          effectiveOnline = false;
+        }
+      } catch (err) {
+        console.error('获取在线缓存信息失败，尝试使用本地缓存:', err);
+        effectiveOnline = false;
+      }
+    }
+
+    const downloadPath = `${bootDrive.letter}\\Cloud-PE.iso`;
+
+    toastManager.add({
+      type: 'info',
+      title: '开始升级 Cloud-PE',
+      description: effectiveOnline ? '正在准备最新的 PE 缓存' : '正在使用本地缓存升级启动盘',
+    });
+
+    try {
+      const result = await pipeline.run({
+        config,
+        online: effectiveOnline,
+        withDeploy: true,
+        targetPath: downloadPath,
+        threads: config.downloadThreads,
+        source,
+      });
+      await performDeploy(result.cachedPluginPath);
+    } catch (err) {
+      console.error('升级失败:', err);
+      pipeline.markError();
+      setRunning(false);
+      setIsUpgradingBootDrive(false);
+      toastManager.add({
+        type: 'error',
+        title: '升级失败',
+        description: err instanceof Error ? err.message : String(err ?? '升级过程中发生错误'),
       });
     }
   };
@@ -100,44 +162,35 @@ const UpgradeBootDrivePage: React.FC<UpgradeBootDrivePageProps> = ({ onNavigate 
       return;
     }
 
-    const downloadLink = cacheService.getIsoDownloadLink();
-    if (!downloadLink) {
-      toastManager.add({
-        type: 'error',
-        title: '获取下载链接失败',
-        description: '无法获取ISO镜像下载链接，请检查网络连接',
-      });
-      return;
+    const online = cacheService.getNetworkConnected();
+    if (!online) {
+      try {
+        const dir = await resolveCacheDir(config);
+        const check = await checkOldVersionPrompt(config, dir);
+        if (!check.hasCache) {
+          toastManager.add({
+            type: 'error',
+            title: '无法升级',
+            description: '当前处于离线状态，且没有可用的本地 PE 缓存',
+          });
+          return;
+        }
+        if (check.need) {
+          setOldVersionInfo({ cached: check.cachedVersion, latest: check.latestVersion });
+          setShowOldVersion(true);
+          return;
+        }
+      } catch (err) {
+        console.error('检查缓存状态失败:', err);
+      }
     }
 
-    const downloadPath = `${bootDrive.letter}\\Cloud-PE.iso`;
+    await startUpgrade();
+  };
 
-    setIsDeploying(true);
-    setDownloading(true);
-    setIsUpgradingBootDrive(true);
-
-    toastManager.add({
-      type: 'info',
-      title: '开始升级 Cloud-PE',
-      description: `正在下载 Cloud-PE 镜像到 ${bootDrive.letter} 驱动器`,
-    });
-
-    try {
-      await downloadFileToPath(downloadLink, downloadPath, config.downloadThreads);
-      setDownloading(false);
-      await performDeploy();
-    } catch (err) {
-      console.error('下载文件失败:', err);
-      setDownloading(false);
-      setIsDeploying(false);
-      setIsUpgradingBootDrive(false);
-
-      toastManager.add({
-        type: 'error',
-        title: '下载失败',
-        description: err instanceof Error ? err.message : String(err ?? '下载ISO镜像时发生错误'),
-      });
-    }
+  const handleAcceptOldVersion = async () => {
+    setShowOldVersion(false);
+    await startUpgrade();
   };
 
   if (isCompleted) {
@@ -152,32 +205,33 @@ const UpgradeBootDrivePage: React.FC<UpgradeBootDrivePageProps> = ({ onNavigate 
     );
   }
 
-  if (isDeploying) {
+  if (running) {
     return (
-      <div className="w-full flex flex-col items-center justify-center overflow-hidden px-6 box-border mt-24">
+      <div className="w-full flex flex-col items-center justify-center overflow-hidden px-6 box-border mt-12">
+        <CacheSteps steps={pipeline.steps} current={pipeline.currentIndex} />
         <Globe className="w-16 h-16 mb-6" />
-        <h2 className="text-2xl font-semibold mb-8 text-center">升级中</h2>
+        <h2 className="text-2xl font-semibold mb-8 text-center">{pipeline.statusText || '升级中'}</h2>
 
-        <div className="w-full max-w-md mb-4">
-          <Progress value={percent} max={100}>
-            <div className="flex justify-between items-center mb-2">
-              <span className="text-sm font-medium">下载进度</span>
-              <span className="text-sm tabular-nums">{percent.toFixed(1)}%</span>
+        {pipeline.showProgress && (
+          <>
+            <div className="w-full max-w-md mb-4">
+              <Progress value={pipeline.percent} max={100}>
+                <div className="flex justify-between items-center mb-2">
+                  <span className="text-sm font-medium">进度</span>
+                  <span className="text-sm tabular-nums">{pipeline.percent.toFixed(1)}%</span>
+                </div>
+                <ProgressTrack className="h-2">
+                  <ProgressIndicator />
+                </ProgressTrack>
+              </Progress>
             </div>
-            <ProgressTrack className="h-2">
-              <ProgressIndicator />
-            </ProgressTrack>
-          </Progress>
-        </div>
 
-        <div className="flex justify-between w-full max-w-md mt-4">
-          <span className="text-sm text-muted-foreground font-medium">
-            下载速度: {downloadInfo.speed}
-          </span>
-          <span className="text-sm text-muted-foreground font-medium">
-            状态: {downloading ? '下载中' : '部署中'}
-          </span>
-        </div>
+            <div className="flex justify-between w-full max-w-md mt-4">
+              <span className="text-sm text-muted-foreground font-medium">速度: {pipeline.speed}</span>
+              <span className="text-sm text-muted-foreground font-medium">状态: {pipeline.statusText}</span>
+            </div>
+          </>
+        )}
       </div>
     );
   }
@@ -194,6 +248,22 @@ const UpgradeBootDrivePage: React.FC<UpgradeBootDrivePageProps> = ({ onNavigate 
       <Button onClick={handleStartUpgrade} disabled={!bootDrive?.letter}>
         立即升级
       </Button>
+
+      <AlertDialog open={showOldVersion} onOpenChange={setShowOldVersion}>
+        <AlertDialogPopup>
+          <AlertDialogHeader>
+            <AlertDialogTitle>使用较旧的缓存版本？</AlertDialogTitle>
+            <AlertDialogDescription>
+              当前处于离线状态，本地缓存为 Cloud-PE v{oldVersionInfo.cached}，而最近一次联网时检测到的最新版本为
+              v{oldVersionInfo.latest}。是否继续使用这个较旧的缓存版本升级启动盘？
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogClose render={<Button variant="outline" />}>取消</AlertDialogClose>
+            <Button onClick={handleAcceptOldVersion}>使用旧版本</Button>
+          </AlertDialogFooter>
+        </AlertDialogPopup>
+      </AlertDialog>
     </div>
   );
 };
