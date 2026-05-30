@@ -1066,6 +1066,7 @@ async fn get_and_download_default_plugin(ce_apps_path: &str) -> Result<String, S
         default_plugin_url.to_string(),
         save_path,
         16,
+        None,
     )
     .await
     {
