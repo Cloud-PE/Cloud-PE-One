@@ -1072,13 +1072,14 @@ pub async fn download_plugin_file(
     url: String,
     save_path: PathBuf,
     thread_count: u16,
+    app_handle: Option<AppHandle>,
 ) -> Result<String> {
     download(DownloadConfig {
         url,
         save_path,
         thread_count,
         event_type: DownloadEventType::PluginDownload,
-        app_handle: None,
+        app_handle,
     })
     .await
 }

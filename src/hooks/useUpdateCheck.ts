@@ -33,7 +33,7 @@ export const useUpdateCheck = (): UseUpdateCheckResult => {
         const info = await getUpdateInfo();
         
         // 获取最新版本号
-        const latestVersion = info.hub_new.hub_ver;
+        const latestVersion = info.cloud_pe_one.version;
         
         // 检查是否需要更新
         const needsUpdate = checkNeedsUpdate(CURRENT_VERSION, latestVersion);

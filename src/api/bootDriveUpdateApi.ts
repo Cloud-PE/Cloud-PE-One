@@ -8,11 +8,11 @@ interface BootDriveUpdateInfo {
 // 获取启动盘升级信息
 export const getBootDriveUpdateInfo = async (): Promise<BootDriveUpdateInfo> => {
   try {
-    const response = await unifiedApiService.getData();
-    
+    const response = await unifiedApiService.getInfo();
+
     return {
-      cloudPeVersion: response.data.cloud_pe,
-      cloudPeUpdateList: response.data.cloudpe_updata || []
+      cloudPeVersion: response.data.cloud_pe_version,
+      cloudPeUpdateList: response.data.force_update_versions || []
     };
   } catch (error) {
     console.error('获取启动盘升级信息失败:', error);

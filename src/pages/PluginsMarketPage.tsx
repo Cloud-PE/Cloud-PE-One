@@ -7,8 +7,9 @@ import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsList, TabsTab } from '@/components/ui/tabs';
 import { Tooltip, TooltipTrigger, TooltipPopup } from '@/components/ui/tooltip';
 import { toastManager } from '@/components/ui/toast';
-import { downloadPlugin, updatePlugin, getPluginFiles, generatePluginId, compareVersions, Plugin } from '../api/pluginsApi';
+import { updatePlugin, getPluginFiles, generatePluginId, compareVersions, Plugin } from '../api/pluginsApi';
 import { useAppContext } from '../utils/AppContext';
+import { useTaskQueue } from '../utils/TaskQueueContext';
 import { cacheService } from '../utils/cacheService';
 import CheckCircle from '@/components/icon/CheckCircle';
 
@@ -28,11 +29,10 @@ const PluginsMarketPage: React.FC = () => {
     searchResults,
     searchKeyword,
     config,
-    downloadingPlugins,
-    setPluginDownloading,
     triggerPluginListRefresh,
     isNetworkConnected,
   } = useAppContext();
+  const { enqueueDownload, isPluginActive } = useTaskQueue();
 
   const [currentCategory, setCurrentCategory] = useState<string>('');
   const [, setUserSelectedCategory] = useState<boolean>(false);
@@ -206,36 +206,28 @@ const PluginsMarketPage: React.FC = () => {
       return;
     }
 
-    const pluginId = getPluginUniqueId(plugin);
+    const result = enqueueDownload({
+      name: plugin.name,
+      version: plugin.version,
+      author: plugin.author,
+      describe: plugin.describe,
+      size: plugin.size,
+      link: plugin.link,
+      driveLetter: bootDrive.letter,
+    });
 
-    try {
-      setPluginDownloading(pluginId, true);
-
-      await downloadPlugin(
-        plugin.link,
-        `${plugin.name}_${plugin.version}_${plugin.author}_${plugin.describe}.ce`,
-        bootDrive.letter,
-        config.downloadThreads
-      );
-
+    if (result === 'exists') {
+      toastManager.add({
+        type: 'info',
+        title: '已在队列中',
+        description: `插件 ${plugin.name} 已在下载队列中`,
+      });
+    } else if (result === 'added') {
       toastManager.add({
         type: 'success',
-        title: '下载成功',
-        description: `插件 ${plugin.name} 已下载完成`,
+        title: '已加入下载队列',
+        description: `可在「任务队列」中查看 ${plugin.name} 的下载进度`,
       });
-
-      // 触发插件列表刷新并重新加载本地插件
-      triggerPluginListRefresh();
-      await loadLocalPlugins();
-    } catch (err) {
-      console.error('下载插件失败:', err);
-      toastManager.add({
-        type: 'error',
-        title: '错误',
-        description: `插件 ${plugin.name} 下载失败`,
-      });
-    } finally {
-      setPluginDownloading(pluginId, false);
     }
   };
 
@@ -356,7 +348,7 @@ const PluginsMarketPage: React.FC = () => {
   // 渲染插件卡片
   const renderPluginCard = (plugin: Plugin, index: number) => {
     const pluginId = getPluginUniqueId(plugin);
-    const isDownloading = downloadingPlugins[pluginId];
+    const isDownloading = isPluginActive(pluginId);
     const isProcessing = processingPlugins[pluginId];
     const status = getPluginStatus(plugin);
 

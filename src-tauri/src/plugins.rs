@@ -28,6 +28,7 @@ fn generate_plugin_id(name: &str, author: &str) -> String {
 
 #[command]
 pub async fn download_plugin(
+    app: tauri::AppHandle,
     url: String,
     path: String,
     file_name: Option<String>,
@@ -54,13 +55,14 @@ pub async fn download_plugin(
     let final_filename = file_name.unwrap_or(filename);
     let file_path = download_dir.join(&final_filename);
 
-    download_plugin_file(url, file_path, thread_count)
+    download_plugin_file(url, file_path, thread_count, Some(app))
         .await
         .map_err(|e| e.to_string())
 }
 
 #[command]
 pub async fn update_plugin(
+    app: tauri::AppHandle,
     url: String,
     path: String,
     old_file_name: String,
@@ -90,7 +92,7 @@ pub async fn update_plugin(
     let final_file_path = download_dir.join(&new_file_name);
     let old_file_path = download_dir.join(&old_file_name);
 
-    download_plugin_file(url, temp_file_path.clone(), thread_count)
+    download_plugin_file(url, temp_file_path.clone(), thread_count, Some(app))
         .await
         .map_err(|e| e.to_string())?;
 

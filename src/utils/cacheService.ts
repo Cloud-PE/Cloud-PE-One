@@ -16,7 +16,8 @@ interface CacheData {
   micaSupport: boolean | null;
   currentUsername: string | null;
   networkConnected: boolean | null;
-  
+  serverOk: boolean | null;
+
   // 启动盘相关
   bootDrive: DriveInfoWithVersion | null;
   bootDriveVersion: string | null;
@@ -48,6 +49,7 @@ class CacheService {
     micaSupport: null,
     currentUsername: null,
     networkConnected: null,
+    serverOk: null,
     bootDrive: null,
     bootDriveVersion: null,
     bootDriveUpdateInfo: null,
@@ -124,83 +126,56 @@ class CacheService {
   }
   
   // 加载网络连接状态
+  // 不再单独探测连通性，直接用聚合接口 /v2/cloud-pe-one.json 的请求结果与 server_ok 判断：
+  // 能成功拿到数据且 server_ok 为 true 才视为可用（后续数据加载复用这次请求的缓存）
   private async loadNetworkConnection(): Promise<void> {
     console.log('检查网络连接...');
-    const testUrl = 'https://api.cloud-pe.cn/Hub/connecttest/';
-    const timeout = 5000;
-    
+
     try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), timeout);
-      
-      const response = await window.fetch(testUrl, {
-        method: 'GET',
-        cache: 'no-store',
-        mode: 'cors',
-        headers: {
-          'Cache-Control': 'no-cache, no-store, must-revalidate',
-          'Pragma': 'no-cache',
-          'Expires': '0'
-        },
-        signal: controller.signal
-      });
-      
-      clearTimeout(timeoutId);
-      
-      // 检查响应状态和内容
-      if (response.ok) {
-        const text = await response.text();
-        if (text.trim() !== '') {
-          this.cache.networkConnected = true;
-          console.log('网络连接检测成功');
-          return;
-        }
-      }
-      
-      this.cache.networkConnected = false;
+      const data = await unifiedApiService.getCloudPeOne();
+      this.cache.serverOk = data.server_ok === true;
+      this.cache.networkConnected = data.server_ok === true;
+      console.log('网络连接检测完成, server_ok:', data.server_ok);
     } catch (error) {
-      if (error instanceof Error && error.name === 'AbortError') {
-        console.warn('网络检测超时');
-      } else {
-        console.warn('网络检测失败:', error);
-      }
+      console.warn('网络检测失败:', error);
       this.cache.networkConnected = false;
+      this.cache.serverOk = false;
     }
   }
   
   // 加载统一API数据
   private async loadUnifiedApiData(): Promise<void> {
     try {
-      // 并行请求两个不同的配置
+      // 并行请求主信息与下载链接
       const [defaultData, isoData] = await Promise.all([
-        unifiedApiService.getData(false),
-        unifiedApiService.getData(true)
+        unifiedApiService.getInfo(),
+        unifiedApiService.getDownload()
       ]);
-      
+
       // 保存更新信息
       this.cache.updateInfo = defaultData;
-      
+
       // 保存启动盘更新信息
       this.cache.bootDriveUpdateInfo = {
-        cloudPeVersion: defaultData.data.cloud_pe,
-        cloudPeUpdateList: defaultData.data.cloudpe_updata || []
+        cloudPeVersion: defaultData.data.cloud_pe_version,
+        cloudPeUpdateList: defaultData.data.force_update_versions || []
       };
-      
+
       // 保存通知信息
-      const content = defaultData.hub_new.hub_tip;
-      let type = defaultData.hub_new.hub_tip_type as 'info' | 'warning' | 'danger' | 'success';
+      const content = defaultData.cloud_pe_one.tip;
+      let type = defaultData.cloud_pe_one.tip_type as 'info' | 'warning' | 'danger' | 'success';
       if (!['info', 'warning', 'danger', 'success'].includes(type)) {
         type = 'info';
       }
-      
+
       if (content) {
         this.cache.notification = { content, type };
       } else {
         this.cache.notification = null;
       }
-      
+
       // 保存ISO下载链接
-      this.cache.isoDownloadLink = isoData.down_link || null;
+      this.cache.isoDownloadLink = isoData.download_link || null;
       
       console.log('统一API数据加载完成');
     } catch (error) {
@@ -459,6 +434,10 @@ async reloadBootDriveInfo(driveLetter?: string, skipCheck: boolean = false): Pro
   getNetworkConnected(): boolean {
     return this.cache.networkConnected ?? false;
   }
+
+  getServerOk(): boolean {
+    return this.cache.serverOk ?? false;
+  }
   
   getBootDrive(): DriveInfoWithVersion | null {
     return this.cache.bootDrive;
@@ -528,6 +507,7 @@ async reloadBootDriveInfo(driveLetter?: string, skipCheck: boolean = false): Pro
       micaSupport: null,
       currentUsername: null,
       networkConnected: null,
+      serverOk: null,
       bootDrive: null,
       bootDriveVersion: null,
       bootDriveUpdateInfo: null,
