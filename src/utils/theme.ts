@@ -1,9 +1,7 @@
 import { getAppConfigDir, readTextFile, writeTextFile, exists, createDir } from './tauriApiWrapper';
-import { checkMicaSupport } from './system';
 
 export type ThemeMode = 'system' | 'light' | 'dark';
 export type DownloadThreads = 8 | 16 | 32 | 64 | 128 ;
-export type WindowEffectsMode = 'off' | 'partial' | 'full'; // 新增类型
 
 export interface AppConfig {
   themeMode: ThemeMode;
@@ -11,7 +9,6 @@ export interface AppConfig {
   enablePluginWebSearch?: boolean;
   userNickname?: string;
   enablePersonalizedGreeting?: boolean;
-  enableWindowEffects?: WindowEffectsMode; // 修改为新类型
   // PE 缓存目录（为空时使用软件目录下的默认目录）
   peCachePath?: string;
   // 最后一次联网时获取到的最新 PE 版本号（用于离线判断缓存是否过时）
@@ -25,7 +22,6 @@ const defaultConfig: AppConfig = {
   enablePluginWebSearch: false,
   userNickname: '',
   enablePersonalizedGreeting: false,
-  enableWindowEffects: 'partial', // 默认为"开（局部）"
   peCachePath: '',
   lastKnownLatestPeVersion: '',
 };
@@ -56,22 +52,13 @@ export const loadConfig = async (): Promise<AppConfig> => {
       
       const configContent = await readTextFile(configPath);
       const loadedConfig = JSON.parse(configContent) as AppConfig;
-      
-      // 兼容旧的布尔值配置
-      let windowEffectsMode: WindowEffectsMode = 'partial';
-      if (typeof loadedConfig.enableWindowEffects === 'boolean') {
-        windowEffectsMode = loadedConfig.enableWindowEffects ? 'partial' : 'off';
-      } else if (typeof loadedConfig.enableWindowEffects === 'string') {
-        windowEffectsMode = loadedConfig.enableWindowEffects as WindowEffectsMode;
-      }
-      
+
       // 确保新配置项有默认值（兼容旧配置文件）
       return {
         ...defaultConfig,
         ...loadedConfig,
         enablePluginWebSearch: loadedConfig.enablePluginWebSearch ?? false,
         enablePersonalizedGreeting: loadedConfig.enablePersonalizedGreeting ?? false,
-        enableWindowEffects: windowEffectsMode
       };
     } catch (error) {
       // 开发环境下的回退方案
@@ -79,22 +66,13 @@ export const loadConfig = async (): Promise<AppConfig> => {
       const savedConfig = localStorage.getItem('app-config');
       if (savedConfig) {
         const parsedConfig = JSON.parse(savedConfig) as AppConfig;
-        
-        // 兼容旧的布尔值配置
-        let windowEffectsMode: WindowEffectsMode = 'partial';
-        if (typeof parsedConfig.enableWindowEffects === 'boolean') {
-          windowEffectsMode = parsedConfig.enableWindowEffects ? 'partial' : 'off';
-        } else if (typeof parsedConfig.enableWindowEffects === 'string') {
-          windowEffectsMode = parsedConfig.enableWindowEffects as WindowEffectsMode;
-        }
-        
+
         // 确保新配置项有默认值
         return {
           ...defaultConfig,
           ...parsedConfig,
           enablePluginWebSearch: parsedConfig.enablePluginWebSearch ?? false,
           enablePersonalizedGreeting: parsedConfig.enablePersonalizedGreeting ?? false,
-          enableWindowEffects: windowEffectsMode
         };
       }
       return defaultConfig;
@@ -148,61 +126,5 @@ export const applyTheme = (mode: ThemeMode): void => {
     document.body.classList.remove('dark');
     document.body.classList.add('semi-always-light');
     document.body.classList.remove('semi-always-dark');
-  }
-};
-
-// 窗口效果CSS样式
-const WINDOW_EFFECTS_CSS = `
-.semi-layout-header, .semi-always-dark, .semi-always-light {
-  background: transparent !important;
-}
-
-.semi-layout-sider, .semi-navigation {
-  background: transparent !important;
-}
-`;
-
-const WINDOW_EFFECTS_CSS_MORE = `
-.plugins-market-nav, .semi-layout-content, .plugins-market-list, .plugins-info {
-  background: transparent !important;
-}
-`;
-
-// 应用窗口效果
-export const applyWindowEffects = async (mode: WindowEffectsMode): Promise<void> => {
-  const styleId = 'window-effects-styles';
-  let styleElement = document.getElementById(styleId);
-
-  if (mode !== 'off') {
-    // 检查系统是否支持Mica效果
-    const isMicaSupported = await checkMicaSupport();
-    
-    if (!isMicaSupported) {
-      console.warn('当前系统版本不支持Mica效果，忽略窗口效果设置');
-      // 移除样式元素（如果存在）
-      if (styleElement) {
-        styleElement.remove();
-      }
-      return;
-    }
-    
-    // 创建或更新样式元素
-    if (!styleElement) {
-      styleElement = document.createElement('style');
-      styleElement.id = styleId;
-      document.head.appendChild(styleElement);
-    }
-    
-    // 根据模式应用不同的样式
-    if (mode === 'partial') {
-      styleElement.textContent = WINDOW_EFFECTS_CSS;
-    } else if (mode === 'full') {
-      styleElement.textContent = WINDOW_EFFECTS_CSS + WINDOW_EFFECTS_CSS_MORE;
-    }
-  } else {
-    // 移除样式元素
-    if (styleElement) {
-      styleElement.remove();
-    }
   }
 };

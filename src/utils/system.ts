@@ -24,32 +24,6 @@ export const checkBootDrive = async (): Promise<DriveInfo | null> => {
   }
 };
 
-// 检查Mica效果支持
-export const checkMicaSupport = async (): Promise<boolean> => {
-  try {
-    const isSupported = await invoke('check_mica_support') as boolean;
-    console.log('Mica效果支持状态:', isSupported);
-    return isSupported;
-  } catch (error) {
-    console.error('检测Mica效果支持失败:', error);
-    // 出错时默认不支持
-    return false;
-  }
-};
-
-// 检查是否已开启透明效果
-export const checkTransparencyEnabled = async (): Promise<boolean> => {
-  try {
-    const isSupported = await invoke('check_transparency_enabled') as boolean;
-    console.log('透明效果支持状态:', isSupported);
-    return isSupported;
-  } catch (error) {
-    console.error('检测透明效果开启失败:', error);
-    // 出错时默认不支持
-    return false;
-  }
-};
-
 // 获取所有驱动器
 export const getAllDrives = async (): Promise<string[]> => {
   try {
