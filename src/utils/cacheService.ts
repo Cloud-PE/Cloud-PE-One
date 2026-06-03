@@ -14,7 +14,6 @@ interface DriveInfoWithVersion extends DriveInfo {
 // 缓存数据接口
 interface CacheData {
   // 系统相关
-  micaSupport: boolean | null;
   currentUsername: string | null;
   networkConnected: boolean | null;
   serverOk: boolean | null;
@@ -47,7 +46,6 @@ interface CacheData {
 // 缓存管理类
 class CacheService {
   private cache: CacheData = {
-    micaSupport: null,
     currentUsername: null,
     networkConnected: null,
     serverOk: null,
@@ -99,7 +97,6 @@ class CacheService {
       console.log('无网络连接，只加载本地数据');
       // 只加载不需要网络的数据
       await Promise.allSettled([
-        this.loadMicaSupport(),
         this.loadCurrentUsername(),
         this.loadAllBootDrivesWithVersion(), // 修改：加载所有启动盘及版本
       ]);
@@ -107,7 +104,6 @@ class CacheService {
       // 有网络连接，加载所有数据
       const promises = [
         // 系统相关
-        this.loadMicaSupport(),
         this.loadCurrentUsername(),
         
         // 启动盘相关
@@ -195,17 +191,6 @@ class CacheService {
       console.log('统一API数据加载完成');
     } catch (error) {
       console.error('加载统一API数据失败:', error);
-    }
-  }
-  
-  // 加载Mica支持状态
-  private async loadMicaSupport(): Promise<void> {
-    try {
-      this.cache.micaSupport = await invoke('check_mica_support') as boolean;
-      console.log('Mica支持状态:', this.cache.micaSupport);
-    } catch (error) {
-      console.error('检测Mica支持失败:', error);
-      this.cache.micaSupport = false;
     }
   }
   
@@ -422,26 +407,6 @@ async reloadBootDriveInfo(driveLetter?: string, skipCheck: boolean = false): Pro
 }
   
   // 获取缓存数据的方法
-  getMicaSupport(): boolean {
-    return this.cache.micaSupport ?? false;
-  }
-  
-  // 修改后的 getTransparencyEnabled 方法
-  async getTransparencyEnabled(): Promise<boolean> {
-    // 如果不支持 Mica，直接返回 false
-    if (!this.cache.micaSupport) {
-      return false;
-    }
-    
-    // 如果支持 Mica，每次都实时检查
-    try {
-      return await invoke('check_transparency_enabled') as boolean;
-    } catch (error) {
-      console.error('检测透明效果失败:', error);
-      return false;
-    }
-  }
-  
   getCurrentUsername(): string {
     return this.cache.currentUsername ?? '用户';
   }
@@ -519,7 +484,6 @@ async reloadBootDriveInfo(driveLetter?: string, skipCheck: boolean = false): Pro
     
     // 清除本地缓存
     this.cache = {
-      micaSupport: null,
       currentUsername: null,
       networkConnected: null,
       serverOk: null,

@@ -49,8 +49,6 @@ fn main() {
             usb_api::close_app,
             install_ventoy,
             get_current_username,
-            check_mica_support,
-            check_transparency_enabled,
             open_devtools,
             exit_app,
             get_default_pe_cache_dir,
@@ -95,105 +93,6 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
-}
-
-#[tauri::command]
-fn check_mica_support() -> Result<bool, String> {
-    #[cfg(target_os = "windows")]
-    {
-        use winapi::um::winnt::RTL_OSVERSIONINFOW;
-        use winapi::shared::ntdef::NTSTATUS;
-        use winapi::shared::ntstatus::STATUS_SUCCESS;
-
-        unsafe {
-            let mut osvi: RTL_OSVERSIONINFOW = std::mem::zeroed();
-            osvi.dwOSVersionInfoSize = std::mem::size_of::<RTL_OSVERSIONINFOW>() as u32;
-
-            let ntdll = winapi::um::libloaderapi::GetModuleHandleA(b"ntdll.dll\0".as_ptr() as *const i8);
-            if ntdll.is_null() {
-                return Err("无法加载 ntdll.dll".to_string());
-            }
-
-            let rtl_get_version = winapi::um::libloaderapi::GetProcAddress(
-                ntdll,
-                b"RtlGetVersion\0".as_ptr() as *const i8,
-            );
-
-            if rtl_get_version.is_null() {
-                return Err("无法找到 RtlGetVersion 函数".to_string());
-            }
-
-            let rtl_get_version: extern "system" fn(*mut RTL_OSVERSIONINFOW) -> NTSTATUS =
-                std::mem::transmute(rtl_get_version);
-
-            let status = rtl_get_version(&mut osvi);
-            if status == STATUS_SUCCESS {
-                let is_windows_11 = osvi.dwMajorVersion >= 10 && osvi.dwBuildNumber >= 22621;
-                Ok(is_windows_11)
-            } else {
-                Err("获取系统版本失败".to_string())
-            }
-        }
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        Ok(false)
-    }
-}
-
-#[tauri::command]
-fn check_transparency_enabled() -> Result<bool, String> {
-    #[cfg(target_os = "windows")]
-    {
-        use winapi::um::winreg::*;
-        use winapi::um::winnt::*;
-        use winapi::shared::minwindef::*;
-        use winapi::shared::winerror::*;
-
-        unsafe {
-            let mut key: HKEY = std::ptr::null_mut();
-            let key_path = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize\0";
-
-            let result = RegOpenKeyExA(
-                HKEY_CURRENT_USER,
-                key_path.as_ptr() as *const i8,
-                0,
-                KEY_READ,
-                &mut key,
-            );
-
-            if result == ERROR_SUCCESS as i32 {
-                let mut value: DWORD = 1;
-                let mut size = std::mem::size_of::<DWORD>() as DWORD;
-                let value_name = "EnableTransparency\0";
-
-                let query_result = RegQueryValueExA(
-                    key,
-                    value_name.as_ptr() as *const i8,
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    &mut value as *mut DWORD as *mut BYTE,
-                    &mut size,
-                );
-
-                RegCloseKey(key);
-
-                if query_result == ERROR_SUCCESS as i32 {
-                    Ok(value != 0)
-                } else {
-                    Ok(true)
-                }
-            } else {
-                Err("无法打开注册表键".to_string())
-            }
-        }
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        Ok(false)
-    }
 }
 
 #[tauri::command]

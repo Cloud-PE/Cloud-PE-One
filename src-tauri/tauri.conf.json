@@ -20,13 +20,8 @@
         "resizable": true,
         "fullscreen": false,
         "decorations": false,
-        "transparent": true,
-        "visible": false,
-        "windowEffects": {
-          "effects": ["mica"],
-          "state": "active",
-          "radius": 12.0
-        }
+        "transparent": false,
+        "visible": false
       }
     ],
     "security": {

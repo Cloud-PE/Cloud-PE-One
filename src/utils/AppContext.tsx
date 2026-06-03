@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
-import { AppConfig, loadConfig, saveConfig, applyTheme, applyWindowEffects, WindowEffectsMode } from './theme';
+import { AppConfig, loadConfig, saveConfig, applyTheme } from './theme';
 import type { DriveInfo } from './system';
 import { cacheService } from './cacheService';
 import { compareVersions } from '../api/bootDriveUpdateApi';
@@ -43,9 +43,6 @@ interface AppContextType {
   isCheckingUpdate: boolean;
   updateError: string | null;
   updateDialogVisible: boolean;
-  // 新增Mica支持状态
-  isMicaSupported: boolean;
-  isCheckingMicaSupport: boolean;
   // 新增插件数据相关状态
   pluginCategories: PluginCategory[];
   isLoadingPlugins: boolean;
@@ -111,9 +108,6 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
   const [isNetworkConnected, setNetworkConnected] = useState<boolean>(true);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [updateDialogVisible, setUpdateDialogVisible] = useState<boolean>(false);
-  // 新增：Mica支持状态
-  const [isMicaSupported, setIsMicaSupported] = useState<boolean>(false);
-  const [isCheckingMicaSupport] = useState<boolean>(false);
   
   // 插件数据相关状态
   const [pluginCategories, setPluginCategories] = useState<PluginCategory[]>([]);
@@ -168,7 +162,6 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
       await cacheService.initialize();
       
       // 从缓存获取数据
-      setIsMicaSupported(cacheService.getMicaSupport());
       setPluginCategories(cacheService.getPluginCategories() || []);
       
       // 获取所有启动盘
@@ -290,9 +283,6 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         if (loadedConfig.enablePersonalizedGreeting === undefined) {
           loadedConfig.enablePersonalizedGreeting = false;
         }
-        if (loadedConfig.enableWindowEffects === undefined) {
-          loadedConfig.enableWindowEffects = 'partial';
-        }
         
         // 如果用户称呼为空，使用缓存的系统用户名
         if (!loadedConfig.userNickname) {
@@ -302,24 +292,13 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         
         setConfig(loadedConfig);
         applyTheme(loadedConfig.themeMode);
-        
-        // 应用窗口效果
-        const windowEffectsMode = loadedConfig.enableWindowEffects || 'off';
-        const shouldApplyEffects = windowEffectsMode !== 'off' && 
-                                 loadedConfig.themeMode === 'system' && 
-                                 isMicaSupported;
-        if (shouldApplyEffects) {
-          applyWindowEffects(windowEffectsMode as WindowEffectsMode);
-        } else {
-          applyWindowEffects('off');
-        }
       } catch (error) {
         console.error('初始化配置失败:', error);
       }
     };
 
     initConfig();
-  }, [isMicaSupported]);
+  }, []);
 
   // 监听搜索关键词变化，实时更新搜索结果
   useEffect(() => {
@@ -364,22 +343,12 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
       
       const handleChange = () => {
         applyTheme('system');
-        // 当系统主题变化时，重新应用窗口效果
-        const windowEffectsMode = config.enableWindowEffects || 'off';
-        const shouldApplyEffects = windowEffectsMode !== 'off' && 
-                                 config.themeMode === 'system' && 
-                                 isMicaSupported;
-        if (shouldApplyEffects) {
-          applyWindowEffects(windowEffectsMode as WindowEffectsMode);
-        } else {
-          applyWindowEffects('off');
-        }
       };
       
       mediaQuery.addEventListener('change', handleChange);
       return () => mediaQuery.removeEventListener('change', handleChange);
     }
-  }, [config.themeMode, config.enableWindowEffects, isMicaSupported]);
+  }, [config.themeMode]);
 
   // 当检测到更新时，显示更新对话框
   useEffect(() => {
@@ -506,30 +475,6 @@ const reloadBootDrive = async (driveLetter: string, skipCheck: boolean = false) 
   
     if (newConfig.themeMode) {
       applyTheme(newConfig.themeMode);
-      // 当主题模式变化时，重新评估窗口效果
-      const windowEffectsMode = updatedConfig.enableWindowEffects || 'off';
-      const shouldApplyEffects = windowEffectsMode !== 'off' && 
-                               newConfig.themeMode === 'system' && 
-                               isMicaSupported;
-      if (shouldApplyEffects) {
-        applyWindowEffects(windowEffectsMode as WindowEffectsMode);
-      } else {
-        applyWindowEffects('off');
-      }
-    }
-  
-    // 新增：如果更新了窗口效果设置，应用对应样式
-    if (newConfig.enableWindowEffects !== undefined) {
-      // 只有在系统主题模式下且系统支持Mica时才应用窗口效果
-      const windowEffectsMode = newConfig.enableWindowEffects as WindowEffectsMode;
-      const shouldApplyEffects = windowEffectsMode !== 'off' && 
-                               updatedConfig.themeMode === 'system' && 
-                               isMicaSupported;
-      if (shouldApplyEffects) {
-        applyWindowEffects(windowEffectsMode);
-      } else {
-        applyWindowEffects('off');
-      }
     }
   };
 
@@ -549,9 +494,6 @@ const reloadBootDrive = async (driveLetter: string, skipCheck: boolean = false) 
     isCheckingUpdate,
     updateError,
     updateDialogVisible,
-    // 新增Mica支持状态
-    isMicaSupported,
-    isCheckingMicaSupport,
     // 新增插件数据相关状态
     pluginCategories,
     isLoadingPlugins,
