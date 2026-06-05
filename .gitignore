@@ -1,0 +1,36 @@
+# Node / 前端构建产物
+node_modules/
+dist/
+.vite/
+
+# TypeScript 增量缓存
+*.tsbuildinfo
+
+# Rust / Tauri 构建产物
+src-tauri/target/
+src-tauri/.cargo/
+
+# IDE / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 日志
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# 环境变量
+.env
+.env.local
+.env.*.local
+
+# Release / CI 构建临时产物
+/ventoy/
+/ventoy-extract/
+/ventoy.zip
+/package/
+/Cloud-PE.One.zip

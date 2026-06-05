@@ -1,0 +1,39 @@
+/* 应用全局样式 */
+.app-container {
+  width: 100%;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.semi-banner {
+  border-radius: var(--semi-border-radius-small);
+}
+
+/* 自定义滚动条样式 */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 6px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.3);
+}
+
+/* 深色模式下的滚动条 */
+.semi-always-dark ::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.semi-always-dark ::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+.draggable {
+  -webkit-app-region: drag;
+  cursor: move;
+}

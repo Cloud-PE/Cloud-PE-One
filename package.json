@@ -1,0 +1,68 @@
+{
+  "name": "cloud-pe-one",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "lint": "eslint .",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build"
+  },
+  "dependencies": {
+    "@base-ui-components/react": "1.0.0-beta.6",
+    "@tailwindcss/vite": "^4.1.17",
+    "@tauri-apps/api": "^2.6.0",
+    "@tauri-apps/plugin-dialog": "^2.3.0",
+    "@tauri-apps/plugin-fs": "^2.4.0",
+    "@tauri-apps/plugin-shell": "^2.3.0",
+    "@tauri-apps/plugin-store": "~2",
+    "axios": "^1.9.0",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.554.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-error-boundary": "^6.0.0",
+    "react-markdown": "^10.1.0",
+    "tailwind-merge": "^3.4.0",
+    "tailwindcss": "^4.1.17"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.25.0",
+    "@tauri-apps/cli": "^2.5.0",
+    "@types/node": "^24.10.1",
+    "@types/react": "^18.2.45",
+    "@types/react-dom": "^18.2.18",
+    "@vitejs/plugin-react": "^4.4.1",
+    "eslint": "^9.25.0",
+    "eslint-plugin-react-hooks": "^5.2.0",
+    "eslint-plugin-react-refresh": "^0.4.19",
+    "globals": "^16.0.0",
+    "sass": "^1.89.2",
+    "tw-animate-css": "^1.4.0",
+    "typescript": "~5.8.3",
+    "typescript-eslint": "^8.30.1",
+    "vite": "^6.3.5"
+  },
+  "author": "Cloud-PE Dev",
+  "license": "Apache 2.0",
+  "description": "Cloud-PE One 是一个基于 Coss UI + Tailwind CSS + Vite + TypeScript + Tauri + Rust 开发的桌面应用程序，用于管理 Cloud-PE 启动盘。",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-username/cloud-pe-one.git"
+  },
+  "keywords": [
+    "cloud-pe",
+    "tauri",
+    "desktop",
+    "react",
+    "typescript",
+    "coss-ui",
+    "tailwindcss",
+    "rust"
+  ]
+}

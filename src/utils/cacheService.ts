@@ -1,0 +1,505 @@
+// 新引入的统一的缓存逻辑 防止S-主播疯狂请求攻击我服务器
+import { invoke } from '@tauri-apps/api/core';
+import { unifiedApiService } from '../api/unifiedApi';
+import { getPlugins } from '../api/pluginsApi';
+import { loadConfig, saveConfig } from './theme';
+import type { DriveInfo } from './system';
+import type { PluginCategory } from '../api/pluginsApi';
+
+// 扩展 DriveInfo 接口以包含版本信息
+interface DriveInfoWithVersion extends DriveInfo {
+  version?: string | null;
+}
+
+// 缓存数据接口
+interface CacheData {
+  // 系统相关
+  currentUsername: string | null;
+  networkConnected: boolean | null;
+  serverOk: boolean | null;
+
+  // 启动盘相关
+  bootDrive: DriveInfoWithVersion | null;
+  bootDriveVersion: string | null;
+  bootDriveUpdateInfo: {
+    cloudPeVersion: string;
+    cloudPeUpdateList: string[];
+  } | null;
+  
+  // 应用更新相关
+  updateInfo: any | null;
+  
+  // 插件相关
+  pluginCategories: PluginCategory[] | null;
+  hasPlugins: boolean;  // 新增：是否有插件
+  
+  // 通知相关
+  notification: any | null;
+  
+  // ISO下载链接
+  isoDownloadLink: string | null;
+  
+  // 新增：所有启动盘列表（包含版本信息）
+  allBootDrives: DriveInfoWithVersion[] | null;
+}
+
+// 缓存管理类
+class CacheService {
+  private cache: CacheData = {
+    currentUsername: null,
+    networkConnected: null,
+    serverOk: null,
+    bootDrive: null,
+    bootDriveVersion: null,
+    bootDriveUpdateInfo: null,
+    updateInfo: null,
+    pluginCategories: null,
+    hasPlugins: false,  // 默认无插件
+    notification: null,
+    isoDownloadLink: null,
+    allBootDrives: null, // 新增
+  };
+  
+  private isInitialized = false;
+  private initializationPromise: Promise<void> | null = null;
+  
+  // 初始化所有缓存数据
+  async initialize(): Promise<void> {
+    // 如果已经在初始化中，返回现有的Promise
+    if (this.initializationPromise) {
+      return this.initializationPromise;
+    }
+    
+    // 如果已经初始化完成，直接返回
+    if (this.isInitialized) {
+      return Promise.resolve();
+    }
+    
+    // 开始初始化
+    this.initializationPromise = this._doInitialize();
+    
+    try {
+      await this.initializationPromise;
+      this.isInitialized = true;
+    } finally {
+      this.initializationPromise = null;
+    }
+  }
+  
+  private async _doInitialize(): Promise<void> {
+    console.log('开始初始化缓存数据...');
+    
+    // 首先检查网络连接（这个必须先执行，因为后续请求依赖网络）
+    await this.loadNetworkConnection();
+    
+    // 如果没有网络连接，只加载本地数据
+    if (!this.cache.networkConnected) {
+      console.log('无网络连接，只加载本地数据');
+      // 只加载不需要网络的数据
+      await Promise.allSettled([
+        this.loadCurrentUsername(),
+        this.loadAllBootDrivesWithVersion(), // 修改：加载所有启动盘及版本
+      ]);
+    } else {
+      // 有网络连接，加载所有数据
+      const promises = [
+        // 系统相关
+        this.loadCurrentUsername(),
+        
+        // 启动盘相关
+        this.loadAllBootDrivesWithVersion(), // 修改：加载所有启动盘及版本
+        
+        // 统一API数据（包含更新信息、通知、启动盘更新信息、ISO链接）
+        this.loadUnifiedApiData(),
+        
+        // 插件相关
+        this.loadPluginCategories(),
+      ];
+      
+      await Promise.allSettled(promises);
+    }
+    
+    console.log('缓存数据初始化完成');
+  }
+  
+  // 加载网络连接状态
+  // 不再单独探测连通性，直接用聚合接口 /v2/cloud-pe-one.json 的请求结果与 server_ok 判断：
+  // 能成功拿到数据且 server_ok 为 true 才视为可用（后续数据加载复用这次请求的缓存）
+  private async loadNetworkConnection(): Promise<void> {
+    console.log('检查网络连接...');
+
+    try {
+      const data = await unifiedApiService.getCloudPeOne();
+      this.cache.serverOk = data.server_ok === true;
+      this.cache.networkConnected = data.server_ok === true;
+      console.log('网络连接检测完成, server_ok:', data.server_ok);
+    } catch (error) {
+      console.warn('网络检测失败:', error);
+      this.cache.networkConnected = false;
+      this.cache.serverOk = false;
+    }
+  }
+  
+  // 加载统一API数据
+  private async loadUnifiedApiData(): Promise<void> {
+    try {
+      // 并行请求主信息与下载链接
+      const [defaultData, isoData] = await Promise.all([
+        unifiedApiService.getInfo(),
+        unifiedApiService.getDownload()
+      ]);
+
+      // 保存更新信息
+      this.cache.updateInfo = defaultData;
+
+      // 保存启动盘更新信息
+      this.cache.bootDriveUpdateInfo = {
+        cloudPeVersion: defaultData.data.cloud_pe_version,
+        cloudPeUpdateList: defaultData.data.force_update_versions || []
+      };
+
+      // 记录最后一次联网时获取到的最新 PE 版本号（用于离线判断缓存是否过时）
+      const latestPeVersion = (defaultData.data.cloud_pe_version || '').replace(/^v/i, '').trim();
+      if (latestPeVersion) {
+        try {
+          const cfg = await loadConfig();
+          if (cfg.lastKnownLatestPeVersion !== latestPeVersion) {
+            cfg.lastKnownLatestPeVersion = latestPeVersion;
+            await saveConfig(cfg);
+          }
+        } catch (err) {
+          console.error('保存最新 PE 版本号失败:', err);
+        }
+      }
+
+      // 保存通知信息
+      const content = defaultData.cloud_pe_one.tip;
+      let type = defaultData.cloud_pe_one.tip_type as 'info' | 'warning' | 'danger' | 'success';
+      if (!['info', 'warning', 'danger', 'success'].includes(type)) {
+        type = 'info';
+      }
+
+      if (content) {
+        this.cache.notification = { content, type };
+      } else {
+        this.cache.notification = null;
+      }
+
+      // 保存ISO下载链接
+      this.cache.isoDownloadLink = isoData.download_link || null;
+      
+      console.log('统一API数据加载完成');
+    } catch (error) {
+      console.error('加载统一API数据失败:', error);
+    }
+  }
+  
+  // 加载当前用户名
+  private async loadCurrentUsername(): Promise<void> {
+    try {
+      this.cache.currentUsername = await invoke('get_current_username') as string;
+      console.log('当前用户名:', this.cache.currentUsername);
+    } catch (error) {
+      console.error('获取用户名失败:', error);
+      this.cache.currentUsername = '用户';
+    }
+  }
+  
+  // 新增：加载所有启动盘（包含版本信息）
+  private async loadAllBootDrivesWithVersion(): Promise<void> {
+    try {
+      const result = await invoke('check_all_boot_drives') as any[];
+      if (result && result.length > 0) {
+        // 为每个启动盘加载版本信息
+        const drivesWithVersion = await Promise.all(
+          result.map(async (drive) => {
+            try {
+              const version = await invoke('read_boot_drive_version', { 
+                driveLetter: drive.letter 
+              }) as string;
+              return {
+                ...drive,
+                version
+              };
+            } catch (error) {
+              console.error(`获取启动盘 ${drive.letter} 版本失败:`, error);
+              return {
+                ...drive,
+                version: null
+              };
+            }
+          })
+        );
+        
+        this.cache.allBootDrives = drivesWithVersion;
+        
+        // 如果只有一个启动盘，直接设置为当前启动盘
+        if (drivesWithVersion.length === 1) {
+          this.cache.bootDrive = drivesWithVersion[0];
+          this.cache.bootDriveVersion = drivesWithVersion[0].version;
+        }
+      } else {
+        this.cache.allBootDrives = [];
+        this.cache.bootDrive = null;
+        this.cache.bootDriveVersion = null;
+      }
+    } catch (error) {
+      console.error('检查启动盘失败:', error);
+      this.cache.allBootDrives = [];
+      this.cache.bootDrive = null;
+    }
+  }
+  
+  // 设置当前选中的启动盘
+  async setSelectedBootDrive(driveLetter: string): Promise<void> {
+    const drive = this.cache.allBootDrives?.find(d => d.letter === driveLetter);
+    if (drive) {
+      this.cache.bootDrive = drive;
+      this.cache.bootDriveVersion = drive.version || null;
+    }
+  }
+
+  /*
+  // 加载启动盘版本
+  private async loadBootDriveVersion(driveLetter: string): Promise<void> {
+    try {
+      this.cache.bootDriveVersion = await invoke('read_boot_drive_version', { driveLetter }) as string;
+      console.log('启动盘版本:', this.cache.bootDriveVersion);
+    } catch (error) {
+      console.error('读取启动盘版本失败:', error);
+      this.cache.bootDriveVersion = null;
+    }
+  }
+  */
+  
+  // 加载插件分类
+  private async loadPluginCategories(): Promise<void> {
+    try {
+      const pluginData = await getPlugins();
+      
+      // 判断是否有插件
+      // data数组为空或者所有分类下的list都为空，则认为没有插件
+      const hasPlugins = pluginData && pluginData.length > 0 && 
+        pluginData.some(category => category.list && category.list.length > 0);
+      
+      this.cache.pluginCategories = pluginData;
+      this.cache.hasPlugins = hasPlugins;
+      
+      console.log('插件分类已加载，数量:', this.cache.pluginCategories?.length);
+      console.log('是否有插件:', this.cache.hasPlugins);
+    } catch (error) {
+      console.error('获取插件列表失败:', error);
+      this.cache.pluginCategories = null;
+      this.cache.hasPlugins = false;
+    }
+  }
+  
+  // 重新加载启动盘信息（用于制作启动盘成功后）
+async reloadBootDriveInfo(driveLetter?: string, skipCheck: boolean = false): Promise<void> {
+  console.log('重新加载启动盘信息...');
+  
+  if (driveLetter) {
+    // 如果提供了盘符
+    if (skipCheck) {
+      // 跳过检查，直接标记为启动盘（用于刚制作完成的情况）
+      try {
+        // 获取版本信息
+        const version = await invoke('read_boot_drive_version', { driveLetter }) as string;
+        const driveWithVersion = {
+          letter: driveLetter,
+          version,
+          isBootDrive: true // 直接标记为启动盘
+        };
+        
+        this.cache.bootDrive = driveWithVersion;
+        this.cache.bootDriveVersion = version;
+        
+        // 更新 allBootDrives 列表
+        if (this.cache.allBootDrives) {
+          const existingIndex = this.cache.allBootDrives.findIndex(d => d.letter === driveLetter);
+          if (existingIndex >= 0) {
+            this.cache.allBootDrives[existingIndex] = driveWithVersion;
+          } else {
+            this.cache.allBootDrives.push(driveWithVersion);
+          }
+        } else {
+          this.cache.allBootDrives = [driveWithVersion];
+        }
+        
+        // 如果有网络连接，重新加载统一API数据以获取最新的升级信息
+        if (this.cache.networkConnected) {
+          await this.loadUnifiedApiData();
+        }
+        
+        console.log('启动盘信息已成功加载（跳过检查）');
+        return;
+      } catch (error) {
+        console.error('获取版本信息失败:', error);
+        // 如果版本获取失败，至少设置基本信息
+        const driveWithVersion = {
+          letter: driveLetter,
+          version: null,
+          isBootDrive: true
+        };
+        
+        this.cache.bootDrive = driveWithVersion;
+        this.cache.bootDriveVersion = null;
+        
+        if (this.cache.allBootDrives) {
+          const existingIndex = this.cache.allBootDrives.findIndex(d => d.letter === driveLetter);
+          if (existingIndex >= 0) {
+            this.cache.allBootDrives[existingIndex] = driveWithVersion;
+          } else {
+            this.cache.allBootDrives.push(driveWithVersion);
+          }
+        } else {
+          this.cache.allBootDrives = [driveWithVersion];
+        }
+      }
+    } else {
+      // 正常流程，调用get_drive_info检查
+      try {
+        const driveInfo = await invoke('get_drive_info', { driveLetter }) as any;
+        
+        if (driveInfo && driveInfo.is_boot_drive) {
+          // 获取版本信息
+          try {
+            const version = await invoke('read_boot_drive_version', { driveLetter }) as string;
+            const driveWithVersion = {
+              ...driveInfo,
+              version
+            };
+            
+            this.cache.bootDrive = driveWithVersion;
+            this.cache.bootDriveVersion = version;
+            
+            // 更新 allBootDrives 列表
+            if (this.cache.allBootDrives) {
+              const existingIndex = this.cache.allBootDrives.findIndex(d => d.letter === driveLetter);
+              if (existingIndex >= 0) {
+                this.cache.allBootDrives[existingIndex] = driveWithVersion;
+              } else {
+                this.cache.allBootDrives.push(driveWithVersion);
+              }
+            }
+          } catch (error) {
+            console.error('获取版本信息失败:', error);
+          }
+        }
+        
+        // 如果有网络连接，重新加载统一API数据以获取最新的升级信息
+        if (this.cache.networkConnected) {
+          await this.loadUnifiedApiData();
+        }
+      } catch (error) {
+        console.error('获取驱动器信息失败:', error);
+        await this.loadAllBootDrivesWithVersion();
+      }
+    }
+  } else {
+    // 否则重新扫描所有驱动器
+    await this.loadAllBootDrivesWithVersion();
+    // 如果有网络连接，重新加载统一API数据
+    if (this.cache.networkConnected) {
+      await this.loadUnifiedApiData();
+    }
+  }
+}
+  
+  // 获取缓存数据的方法
+  getCurrentUsername(): string {
+    return this.cache.currentUsername ?? '用户';
+  }
+  
+  getNetworkConnected(): boolean {
+    return this.cache.networkConnected ?? false;
+  }
+
+  getServerOk(): boolean {
+    return this.cache.serverOk ?? false;
+  }
+  
+  getBootDrive(): DriveInfoWithVersion | null {
+    return this.cache.bootDrive;
+  }
+  
+  getBootDriveVersion(): string | null {
+    return this.cache.bootDriveVersion;
+  }
+  
+  getBootDriveUpdateInfo(): { cloudPeVersion: string; cloudPeUpdateList: string[] } | null {
+    return this.cache.bootDriveUpdateInfo;
+  }
+  
+  getUpdateInfo(): any | null {
+    return this.cache.updateInfo;
+  }
+  
+  getPluginCategories(): PluginCategory[] {
+    return this.cache.pluginCategories ?? [];
+  }
+  
+  hasPlugins(): boolean {
+    return this.cache.hasPlugins;
+  }
+  
+  getNotification(): any | null {
+    return this.cache.notification;
+  }
+  
+  getIsoDownloadLink(): string | null {
+    return this.cache.isoDownloadLink;
+  }
+  
+  // 新增：获取所有启动盘
+  getAllBootDrives(): DriveInfoWithVersion[] {
+    return this.cache.allBootDrives ?? [];
+  }
+  
+  // 新增：直接更新启动盘版本（用于升级后立即更新，无需重新读取文件）
+  updateBootDriveVersion(driveLetter: string, newVersion: string): void {
+    console.log('cacheService: 直接更新启动盘版本:', driveLetter, '->', newVersion);
+    
+    // 更新当前启动盘版本
+    if (this.cache.bootDrive && this.cache.bootDrive.letter === driveLetter) {
+      this.cache.bootDrive.version = newVersion;
+      this.cache.bootDriveVersion = newVersion;
+    }
+    
+    // 更新allBootDrives列表中的版本
+    if (this.cache.allBootDrives) {
+      const driveIndex = this.cache.allBootDrives.findIndex(d => d.letter === driveLetter);
+      if (driveIndex >= 0) {
+        this.cache.allBootDrives[driveIndex].version = newVersion;
+      }
+    }
+    
+    console.log('cacheService: 版本更新完成');
+  }
+  
+  // 清除所有缓存
+  clearCache(): void {
+    // 清除统一API服务的缓存
+    unifiedApiService.clearCache();
+    
+    // 清除本地缓存
+    this.cache = {
+      currentUsername: null,
+      networkConnected: null,
+      serverOk: null,
+      bootDrive: null,
+      bootDriveVersion: null,
+      bootDriveUpdateInfo: null,
+      updateInfo: null,
+      pluginCategories: null,
+      hasPlugins: false,
+      notification: null,
+      isoDownloadLink: null,
+      allBootDrives: null,
+    };
+    this.isInitialized = false;
+  }
+}
+
+// 导出单例实例
+export const cacheService = new CacheService();
