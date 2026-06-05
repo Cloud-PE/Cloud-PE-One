@@ -3,7 +3,7 @@ import { AppConfig, loadConfig, saveConfig, applyTheme } from './theme';
 import type { DriveInfo } from './system';
 import { cacheService } from './cacheService';
 import { compareVersions } from '../api/bootDriveUpdateApi';
-import { isUpdateSkippable, getUpdateLog, getUpdateLink, getAppExecutableName, checkNeedsUpdate } from '../api/updateApi';
+import { getUpdateInfo, isUpdateSkippable, getUpdateLog, getUpdateLink, getAppExecutableName, checkNeedsUpdate } from '../api/updateApi';
 import type { PluginCategory } from '../api/pluginsApi';
 import { resolveCacheDir, getCacheMeta, normalizeVersion } from './peCache';
 
@@ -79,6 +79,8 @@ interface AppContextType {
   allBootDrives: DriveInfoWithVersion[];
   // 新增：切换启动盘
   switchBootDrive: (driveLetter: string) => Promise<void>;
+  // 新增：手动检查应用更新
+  checkForUpdates: () => Promise<{ hasUpdate: boolean; error?: string }>;
   // 原有方法
   setUpdateDialogVisible: (visible: boolean) => void;
   updateConfig: (newConfig: Partial<AppConfig>) => Promise<void>;
@@ -467,6 +469,35 @@ const reloadBootDrive = async (driveLetter: string, skipCheck: boolean = false) 
     }
   };
 
+  // 手动检查应用更新（用于设置页的"检查更新"按钮）
+  const checkForUpdates = async (): Promise<{ hasUpdate: boolean; error?: string }> => {
+    try {
+      const info = await getUpdateInfo();
+      const latestVersion = info.cloud_pe_one.version;
+      const needsUpdate = checkNeedsUpdate(CURRENT_VERSION, latestVersion);
+
+      if (needsUpdate) {
+        setUpdateInfo({
+          version: latestVersion,
+          updateLog: getUpdateLog(info),
+          downloadLink: getUpdateLink(info),
+          appExecutableName: getAppExecutableName(info),
+          canSkip: isUpdateSkippable(info)
+        });
+        setIsUpdateAvailable(true);
+        // 用户主动检查更新时，清除已跳过的版本记录并立即弹出更新对话框
+        localStorage.removeItem('skippedUpdateVersion');
+        setUpdateDialogVisible(true);
+        return { hasUpdate: true };
+      }
+
+      return { hasUpdate: false };
+    } catch (err) {
+      console.error('检查更新失败:', err);
+      return { hasUpdate: false, error: '检查更新失败，请检查网络连接后重试。' };
+    }
+  };
+
   // 更新配置
   const updateConfig = async (newConfig: Partial<AppConfig>) => {
     const updatedConfig = { ...config, ...newConfig };
@@ -530,6 +561,8 @@ const reloadBootDrive = async (driveLetter: string, skipCheck: boolean = false) 
     allBootDrives,
     // 新增切换启动盘
     switchBootDrive,
+    // 新增手动检查更新
+    checkForUpdates,
     // 原有方法
     setUpdateDialogVisible,
     updateConfig,

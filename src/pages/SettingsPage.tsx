@@ -13,7 +13,7 @@ import { Accordion, AccordionItem, AccordionTrigger, AccordionPanel } from '@/co
 import { Select, SelectTrigger, SelectValue, SelectPopup, SelectItem } from '@/components/ui/select';
 import { AlertDialog, AlertDialogPopup, AlertDialogHeader, AlertDialogTitle, AlertDialogDescription, AlertDialogFooter, AlertDialogClose } from '@/components/ui/alert-dialog';
 import { toastManager } from '@/components/ui/toast';
-import { Github, FolderOpen, RotateCcw } from 'lucide-react';
+import { Github, FolderOpen, RotateCcw, RefreshCw } from 'lucide-react';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { resolveCacheDir } from '../utils/peCache';
 import { preparePeCacheDir } from '../api/peCacheApi';
@@ -24,7 +24,8 @@ const SettingsPage: React.FC = () => {
     updateConfig,
     allBootDrives,
     bootDrive,
-    switchBootDrive
+    switchBootDrive,
+    checkForUpdates
   } = useAppContext();
   const [userNickname, setUserNickname] = useState(config.userNickname || '');
   const saveTimeoutRef = useRef<number | null>(null);
@@ -38,6 +39,9 @@ const SettingsPage: React.FC = () => {
   const [cachePathInput, setCachePathInput] = useState<string>(config.peCachePath || '');
   const [defaultCacheDir, setDefaultCacheDir] = useState<string>('');
   const [cacheBusy, setCacheBusy] = useState<boolean>(false);
+
+  // 新增：检查更新状态
+  const [checkingUpdate, setCheckingUpdate] = useState<boolean>(false);
 
   // 解析默认缓存目录（缓存路径为空时在输入框中展示该默认目录）
   useEffect(() => {
@@ -252,6 +256,31 @@ const SettingsPage: React.FC = () => {
     }
   };
 
+  // 处理检查更新
+  const handleCheckForUpdates = async () => {
+    if (checkingUpdate) return;
+    setCheckingUpdate(true);
+    try {
+      const { hasUpdate, error } = await checkForUpdates();
+      if (error) {
+        toastManager.add({
+          title: '失败',
+          description: error,
+          type: 'error',
+        });
+      } else if (!hasUpdate) {
+        toastManager.add({
+          title: '信息',
+          description: '您当前使用的已是最新版本',
+          type: 'info',
+        });
+      }
+      // 有更新时会自动弹出更新对话框，无需额外提示
+    } finally {
+      setCheckingUpdate(false);
+    }
+  };
+
   // 处理测试通知
   const handleTestNotification = () => {
     toastManager.add({
@@ -448,6 +477,10 @@ const SettingsPage: React.FC = () => {
                   </CardHeader>
                   <CardPanel>
                     <div className="flex gap-3">
+                      <Button onClick={handleCheckForUpdates} disabled={checkingUpdate}>
+                        <RefreshCw className={`size-4 mr-2 ${checkingUpdate ? 'animate-spin' : ''}`} />
+                        {checkingUpdate ? '检查中…' : '检查更新'}
+                      </Button>
                       <Button onClick={handleOpenDevTools}>
                         开发人员工具
                       </Button>
