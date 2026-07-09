@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { getUpdateInfo, checkNeedsUpdate, isUpdateSkippable, getUpdateLog, getUpdateLink, getAppExecutableName } from '../api/updateApi';
 
 // 当前应用版本
-const CURRENT_VERSION = 'v1.8';
+const CURRENT_VERSION = 'v1.9';
 
 interface UseUpdateCheckResult {
   isUpdateAvailable: boolean;

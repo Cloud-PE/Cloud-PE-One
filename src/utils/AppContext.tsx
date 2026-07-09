@@ -8,7 +8,7 @@ import type { PluginCategory } from '../api/pluginsApi';
 import { resolveCacheDir, getCacheMeta, normalizeVersion } from './peCache';
 
 // 当前应用版本
-const CURRENT_VERSION = 'v1.8';
+const CURRENT_VERSION = 'v1.9';
 
 interface UpdateInfo {
   version: string;
