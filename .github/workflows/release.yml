@@ -315,6 +315,85 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Upload Cloud-PE One.zip to 21Vianet OneDrive
+        shell: pwsh
+        env:
+          ONEDRIVE_CLIENT_ID: ${{ secrets.ONEDRIVE_CLIENT_ID }}
+          ONEDRIVE_CLIENT_SECRET: ${{ secrets.ONEDRIVE_CLIENT_SECRET }}
+          ONEDRIVE_TENANT_ID: ${{ secrets.ONEDRIVE_TENANT_ID }}
+          ONEDRIVE_USER_EMAIL: ${{ secrets.ONEDRIVE_USER_EMAIL }}
+          ONEDRIVE_REMOTE_ROOT: ${{ secrets.ONEDRIVE_REMOTE_ROOT }}
+          ONEDRIVE_REMOTE_PATH: ${{ secrets.ONEDRIVE_REMOTE_PATH }}
+          UPLOAD_FILE: Cloud-PE.One.zip
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          foreach ($name in @("ONEDRIVE_CLIENT_ID", "ONEDRIVE_CLIENT_SECRET", "ONEDRIVE_TENANT_ID", "ONEDRIVE_USER_EMAIL", "ONEDRIVE_REMOTE_ROOT", "ONEDRIVE_REMOTE_PATH", "UPLOAD_FILE")) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+              throw "Missing value: $name"
+            }
+          }
+
+          $file = Get-Item -LiteralPath $env:UPLOAD_FILE
+          $root = $env:ONEDRIVE_REMOTE_ROOT.Trim([char]'/')
+          $leaf = $env:ONEDRIVE_REMOTE_PATH.TrimStart([char]'/')
+          $targetPath = if ([string]::IsNullOrWhiteSpace($root)) { $leaf } else { "$root/$leaf" }
+          Write-Host "Uploading $($file.Name) to 21Vianet OneDrive: /$targetPath"
+          Write-Host "Size: $($file.Length) bytes"
+
+          if (-not (Get-Command rclone -ErrorAction SilentlyContinue)) {
+            choco install rclone -y --no-progress
+            if ($LASTEXITCODE -ne 0) { throw "Failed to install rclone" }
+          }
+
+          $tokenBody = @{
+            client_id = $env:ONEDRIVE_CLIENT_ID
+            client_secret = $env:ONEDRIVE_CLIENT_SECRET
+            scope = "https://microsoftgraph.chinacloudapi.cn/.default"
+            grant_type = "client_credentials"
+          }
+          $tokenResponse = Invoke-RestMethod `
+            -Method Post `
+            -Uri "https://login.chinacloudapi.cn/$($env:ONEDRIVE_TENANT_ID)/oauth2/v2.0/token" `
+            -ContentType "application/x-www-form-urlencoded" `
+            -Body $tokenBody `
+            -TimeoutSec 60
+          if ([string]::IsNullOrWhiteSpace($tokenResponse.access_token)) {
+            throw "Failed to obtain Microsoft Graph access token"
+          }
+
+          $encodedUser = [System.Uri]::EscapeDataString($env:ONEDRIVE_USER_EMAIL)
+          $drive = Invoke-RestMethod `
+            -Method Get `
+            -Uri "https://microsoftgraph.chinacloudapi.cn/v1.0/users/$encodedUser/drive" `
+            -Headers @{ Authorization = "Bearer $($tokenResponse.access_token)" } `
+            -TimeoutSec 60
+          if ([string]::IsNullOrWhiteSpace($drive.id)) {
+            throw "Failed to resolve OneDrive drive id for $($env:ONEDRIVE_USER_EMAIL)"
+          }
+
+          $env:RCLONE_CONFIG_CLOUDPE_ONEDRIVE_TYPE = "onedrive"
+          $env:RCLONE_CONFIG_CLOUDPE_ONEDRIVE_REGION = "cn"
+          $env:RCLONE_CONFIG_CLOUDPE_ONEDRIVE_CLIENT_ID = $env:ONEDRIVE_CLIENT_ID
+          $env:RCLONE_CONFIG_CLOUDPE_ONEDRIVE_CLIENT_SECRET = $env:ONEDRIVE_CLIENT_SECRET
+          $env:RCLONE_CONFIG_CLOUDPE_ONEDRIVE_TENANT = $env:ONEDRIVE_TENANT_ID
+          $env:RCLONE_CONFIG_CLOUDPE_ONEDRIVE_CLIENT_CREDENTIALS = "true"
+          $env:RCLONE_CONFIG_CLOUDPE_ONEDRIVE_DRIVE_ID = $drive.id
+          $env:RCLONE_CONFIG_CLOUDPE_ONEDRIVE_DRIVE_TYPE = "business"
+
+          rclone deletefile "cloudpe_onedrive:$targetPath"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "Remote file was not deleted, copyto will overwrite it if possible."
+          }
+          rclone copyto $file.FullName "cloudpe_onedrive:$targetPath" --onedrive-chunk-size 80Mi --onedrive-upload-cutoff 4Mi --onedrive-no-versions --transfers 1 --checkers 4 --retries 5 --low-level-retries 20 --stats 10s --progress
+          if ($LASTEXITCODE -ne 0) {
+            throw "rclone upload failed for /$targetPath"
+          }
+          rclone lsl "cloudpe_onedrive:$targetPath"
+          if ($LASTEXITCODE -ne 0) {
+            throw "rclone upload verification failed for /$targetPath"
+          }
+
       - name: Notify update API (do.cloud-pe.cn)
         shell: pwsh
         env:
