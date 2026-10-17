@@ -252,40 +252,6 @@ jobs:
           git tag -f "${NEW_TAG}" "${NEW_SHA}"
           git push origin "refs/tags/${NEW_TAG}" --force
 
-      - name: Delete previous releases
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          KEEP_TAG: ${{ steps.version.outputs.new_tag }}
-        run: |
-          $headers = @{
-            Authorization = "Bearer $env:GH_TOKEN"
-            Accept = "application/vnd.github+json"
-            'X-GitHub-Api-Version' = '2022-11-28'
-          }
-          $repo = $env:GITHUB_REPOSITORY
-          $keepTag = $env:KEEP_TAG
-          try {
-            $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases?per_page=100" -Headers $headers
-          } catch {
-            $releases = @()
-          }
-          foreach ($r in $releases) {
-            if ($r.tag_name -eq $keepTag) { continue }
-            Write-Host "Deleting release $($r.tag_name) (id=$($r.id))"
-            try {
-              Invoke-RestMethod -Method Delete -Uri "https://api.github.com/repos/$repo/releases/$($r.id)" -Headers $headers | Out-Null
-            } catch {
-              Write-Warning "Failed to delete release $($r.id): $_"
-            }
-            try {
-              Invoke-RestMethod -Method Delete -Uri "https://api.github.com/repos/$repo/git/refs/tags/$($r.tag_name)" -Headers $headers | Out-Null
-              Write-Host "Deleted tag $($r.tag_name)"
-            } catch {
-              Write-Warning "Failed to delete tag $($r.tag_name): $_"
-            }
-          }
-
       - name: Prepare release notes
         id: notes
         shell: pwsh
@@ -400,3 +366,29 @@ jobs:
             throw "API rejected: code=$($parsed.code) message=$($parsed.message)"
           }
           Write-Host "OK -- update API now serves $version"
+
+      - name: Delete previous releases
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          KEEP_TAG: ${{ steps.version.outputs.new_tag }}
+        run: |
+          $headers = @{
+            Authorization = "Bearer $env:GH_TOKEN"
+            Accept = "application/vnd.github+json"
+            'X-GitHub-Api-Version' = '2022-11-28'
+          }
+          $repo = $env:GITHUB_REPOSITORY
+          $keepTag = $env:KEEP_TAG
+          try {
+            $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases?per_page=100" -Headers $headers
+          } catch {
+            throw "Could not list existing releases; preserving old releases and tags: $_"
+          }
+          foreach ($r in $releases) {
+            if ($r.tag_name -eq $keepTag) { continue }
+            Write-Host "Deleting release $($r.tag_name) (id=$($r.id))"
+            Invoke-RestMethod -Method Delete -Uri "https://api.github.com/repos/$repo/releases/$($r.id)" -Headers $headers | Out-Null
+            Invoke-RestMethod -Method Delete -Uri "https://api.github.com/repos/$repo/git/refs/tags/$($r.tag_name)" -Headers $headers | Out-Null
+            Write-Host "Deleted old release and tag $($r.tag_name)"
+          }
