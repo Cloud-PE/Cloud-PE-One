@@ -456,7 +456,7 @@ const SettingsPage: React.FC = () => {
                         </span>
                         <span
                           className="cursor-pointer underline text-primary hover:text-primary/80"
-                          onClick={() => handleOpenLink('https://docs.cloud-pe.cn/')}
+                          onClick={() => handleOpenLink('https://cloud-pe.cn/#/docs')}
                         >
                           相关文档
                         </span>

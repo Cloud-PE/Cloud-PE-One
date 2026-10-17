@@ -127,7 +127,7 @@ Cloud-PE-One/
 ## 🔗 相关链接
 
 - [Cloud-PE 官方网站](https://cloud-pe.cn/)
-- [在线文档](https://docs.cloud-pe.cn/)
+- [在线文档](https://cloud-pe.cn/#/docs)
 - [问题反馈](https://github.com/Cloud-PE/Cloud-PE-One/issues)
 
 ## 📮 联系我们

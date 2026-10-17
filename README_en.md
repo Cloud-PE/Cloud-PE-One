@@ -127,7 +127,7 @@ This project is open source under the [Apache 2.0](LICENSE) license.
 ## 🔗 Links
 
 - [Cloud-PE Official Website](https://cloud-pe.cn/)
-- [Documentation](https://docs.cloud-pe.cn/)
+- [Documentation](https://cloud-pe.cn/#/docs)
 - [Issue Tracker](https://github.com/Cloud-PE/Cloud-PE-One/issues)
 
 ## 📮 Contact

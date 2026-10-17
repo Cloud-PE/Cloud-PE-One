@@ -31,7 +31,7 @@ const DocsPage: React.FC = () => {
       )}
       <iframe
         ref={iframeRef}
-        src="https://docs.cloud-pe.cn"
+        src="https://cloud-pe.cn/#/docs"
         className="w-full h-full border-none"
         title="Cloud-PE 文档"
       />
