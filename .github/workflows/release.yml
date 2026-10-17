@@ -325,7 +325,7 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           & ./.github/scripts/upload-to-r2.ps1 `
-            -Prefix "Cloud-PE/Cloud-PE-One" `
+            -Prefix "Cloud-PE/Cloud-PE文件/Cloud-PE-One" `
             -Path "Cloud-PE.One.zip" `
             -PublicBaseUrl "https://r2.cloud-pe.cn"
 
