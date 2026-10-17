@@ -217,7 +217,7 @@ jobs:
           Move-Item -Path $inner.FullName -Destination ventoy
           Remove-Item -Recurse -Force ventoy-extract, ventoy.zip
 
-      - name: Assemble Cloud-PE.One.zip
+      - name: Assemble Cloud-PE One.zip
         shell: pwsh
         run: |
           $exe = 'src-tauri/target/release/cloud-pe-one.exe'
@@ -226,10 +226,10 @@ jobs:
           New-Item -ItemType Directory -Path package | Out-Null
           Copy-Item $exe package/cloud-pe-one.exe
           Copy-Item -Recurse ventoy package/ventoy
-          if (Test-Path Cloud-PE.One.zip) { Remove-Item Cloud-PE.One.zip -Force }
-          Compress-Archive -Path package/* -DestinationPath Cloud-PE.One.zip
-          $size = [math]::Round((Get-Item Cloud-PE.One.zip).Length / 1MB, 2)
-          Write-Host "Built Cloud-PE.One.zip ($size MB)"
+          if (Test-Path 'Cloud-PE One.zip') { Remove-Item 'Cloud-PE One.zip' -Force }
+          Compress-Archive -Path package/* -DestinationPath 'Cloud-PE One.zip'
+          $size = [math]::Round((Get-Item 'Cloud-PE One.zip').Length / 1MB, 2)
+          Write-Host "Built Cloud-PE One.zip ($size MB)"
 
       - name: Commit version bump and tag
         id: commit
@@ -273,7 +273,7 @@ jobs:
           tag_name: ${{ steps.version.outputs.new_tag }}
           name: ${{ steps.version.outputs.new_tag }}
           body: ${{ steps.notes.outputs.body }}
-          files: Cloud-PE.One.zip
+          files: 'Cloud-PE One.zip'
           draft: false
           prerelease: false
           make_latest: 'true'
@@ -281,7 +281,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Upload Cloud-PE.One.zip to Cloudflare R2
+      - name: Upload Cloud-PE One.zip to Cloudflare R2
         shell: pwsh
         env:
           R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
@@ -291,8 +291,8 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           & ./.github/scripts/upload-to-r2.ps1 `
-            -Prefix "Cloud-PE/Cloud-PE文件/Cloud-PE-One" `
-            -Path "Cloud-PE.One.zip" `
+            -Prefix "Cloud-PE/Cloud-PE文件/Cloud-PE One" `
+            -Path "Cloud-PE One.zip" `
             -PublicBaseUrl "https://r2.cloud-pe.cn"
 
       - name: Notify update API (do.cloud-pe.cn)
@@ -310,7 +310,7 @@ jobs:
           }
 
           # 1. MD5 of the zip (uppercase hex, matches PHP side)
-          $md5 = (Get-FileHash -Path Cloud-PE.One.zip -Algorithm MD5).Hash.ToUpper()
+          $md5 = (Get-FileHash -Path 'Cloud-PE One.zip' -Algorithm MD5).Hash.ToUpper()
           $version  = $env:NEW_TAG
           $log      = $env:RELEASE_LOG
           $can_skip = 'true'
